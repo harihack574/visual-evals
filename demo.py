@@ -1,713 +1,368 @@
 import streamlit as st
-from PIL import Image, ImageDraw, ImageOps # Added ImageOps for resizing
+from PIL import Image, ImageDraw, ImageFilter
 import io
-import cv2 # Still useful for bitwise_and if we apply mask with OpenCV
-import numpy as np # Added for NumPy
-import google.generativeai as genai # Added for Gemini
-import asyncio # Added for parallel execution
-import json # For parsing JSON response
-import base64 # For decoding base64 mask
-import traceback # Ensure traceback is imported for the exception handler
+import cv2
+import numpy as np
+import google.generativeai as genai
+import asyncio
+import json
+import base64
+import time
+import logging
+import binascii
+import google.api_core.exceptions
+from skimage.color import rgb2lab, deltaE_cie76, deltaE_ciede2000
+from scipy.stats import wasserstein_distance
+from collections import Counter
+import re
+import tempfile
+import os
+from segmentation_module import GeminiSegmentationModel
 
-def extract_dominant_colors(pil_image, k=5):
-    """
-    Extracts k dominant colors from a PIL Image using k-means clustering.
-    Returns a list of k RGB tuples.
-    """
-    if pil_image is None:
-        st.warning("Cannot extract dominant colors: Input image is None.")
-        return []
-    try:
-        # Convert PIL Image to NumPy array (RGB)
-        img_np = np.array(pil_image.convert('RGB'))
-        
-        # Reshape the image to be a list of pixels
-        pixels = img_np.reshape((-1, 3))
-        
-        # Convert to float32 for k-means
-        pixels = np.float32(pixels)
-        
-        # Define criteria, number of clusters (k) and apply k-means
-        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 0.2)
-        _, labels, centers = cv2.kmeans(pixels, k, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS)
-        
-        # Convert centers (dominant colors) to uint8 and then to a list of RGB tuples
-        centers = np.uint8(centers)
-        dominant_colors = [tuple(color) for color in centers]
-        return dominant_colors
-    except Exception as e:
-        st.warning(f"Could not extract dominant colors: {e}")
-        return []
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-def extract_histogram_features(pil_image, num_bins=32, top_n_peaks=5):
-    """
-    Extracts histogram features (top N peaks for L, a, b channels) from a PIL Image in CIELAB space.
-    Returns a dictionary of features.
-    """
+# --- Image Processing and Feature Extraction ---
+
+def resize_image_to_fixed_size(pil_image):
+    """Resizes an image to a fixed size of (384, 512) for all processing."""
+    fixed_size = (384, 512)
+    if pil_image.size == fixed_size:
+        return pil_image
+    resized_image = pil_image.resize(fixed_size, Image.Resampling.LANCZOS)
+    print(f"Resized image from {pil_image.size} to {fixed_size} for processing")
+    return resized_image
+
+def extract_features(pil_image, mask, image_name=""):
+    """Extracts dominant color, texture histogram, and APL from a PIL image, optionally using a mask."""
     if pil_image is None:
-        st.warning("Cannot extract histogram features: Input image is None.")
+        st.warning(f"Cannot extract features for {image_name}: Input image is None.")
         return None
     try:
-        img_np_rgb = np.array(pil_image.convert('RGB'))
-        img_lab = cv2.cvtColor(img_np_rgb, cv2.COLOR_RGB2LAB)
+        # Ensure image is RGB for feature extraction
+        image_rgb = pil_image.convert('RGB')
+        img_np = np.array(image_rgb)
         
-        features = {}
-        channels = cv2.split(img_lab)
-        channel_names = ['L', 'a', 'b']
-        
-        for i, channel in enumerate(channels):
-            hist = cv2.calcHist([channel], [0], None, [num_bins], [0, 256])
-            cv2.normalize(hist, hist, alpha=0, beta=1, norm_type=cv2.NORM_MINMAX)
-            
-            # Get top N peaks (bin index and value)
-            # Flatten, get sorted indices, and pick top N
-            flat_hist = hist.flatten()
-            # Ensure we don't request more peaks than bins
-            current_top_n = min(top_n_peaks, len(flat_hist))
-            sorted_indices = np.argsort(flat_hist)[::-1] # Sort descending by value
-            
-            peaks = []
-            for peak_idx in range(current_top_n):
-                bin_index = sorted_indices[peak_idx]
-                value = flat_hist[bin_index]
-                if value > 0: # Only consider bins with actual counts
-                     peaks.append({"bin": int(bin_index), "value": float(value)})
-            features[f"{channel_names[i]}_peaks"] = peaks
-            
-            # Add basic stats
-            mean_val, std_dev_val = cv2.meanStdDev(channel)
-            features[f"{channel_names[i]}_stats"] = {
-                "mean": float(mean_val[0][0]),
-                "std_dev": float(std_dev_val[0][0])
-            }
-            
-        return features
-    except Exception as e:
-        st.warning(f"Could not extract histogram features: {e}")
-        return None
+        mask_np = None
+        if mask is not None:
+            # Ensure mask is L and the same size as the image
+            if mask.size != pil_image.size:
+                mask = mask.resize(pil_image.size, Image.Resampling.LANCZOS)
+            if mask.mode != 'L':
+                mask = mask.convert('L')
+            mask_np = np.array(mask)
 
-async def segment_garment(pil_image, api_key, model_name="gemini-1.5-pro", fast_mode=False, use_downscaling=True):
-    """
-    Attempts to segment the primary garment from a PIL image.
-    In fast_mode, skips Gemini analysis and goes directly to classical segmentation.
-    """
-    effective_model_name = model_name 
+        # Dominant Color
+        if mask_np is not None:
+            pixels = np.float32(img_np[mask_np > 0])
+            if pixels.size == 0:
+                st.warning(f"No pixels in mask for {image_name}. Cannot extract features.")
+                return None
+        else:
+            pixels = np.float32(img_np.reshape(-1, 3))
 
-    if pil_image is None:
-        print("Segmentation skipped: Input image is None.")
-        return pil_image, None
+        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 10, 1.0)
+        _, _, centers = cv2.kmeans(pixels, 1, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS)
+        dominant_color = tuple(np.uint8(centers[0]))
 
-    # Fast mode - skip Gemini entirely
-    if fast_mode:
-        print("Fast mode enabled - using classical segmentation directly.")
-        return apply_fast_classical_segmentation(pil_image, use_downscaling)
+        # Average Pixel Luminance (APL)
+        gray_img = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+        if mask_np is not None and np.any(mask_np > 0):
+            apl = np.mean(gray_img[mask_np > 0])
+        else:
+            apl = np.mean(gray_img)
 
-    if not api_key:
-        print(f"Google AI API key not provided for {effective_model_name}. Using classical segmentation fallback.")
-        return apply_fast_classical_segmentation(pil_image, use_downscaling)
-
-    try:
-        # Configure the API key
-        genai.configure(api_key=api_key)
-        
-        # Use GenerativeModel interface
-        model = genai.GenerativeModel(model_name)
-        
-        print(f"Attempting garment analysis with {effective_model_name} (GenerativeModel API) for an image...")
-
-        img_byte_arr = io.BytesIO()
-        pil_image.convert("RGB").save(img_byte_arr, format='PNG')
-        img_byte_arr.seek(0)
-        
-        prompt = """Analyze this image and identify the main piece of clothing worn by the person. 
-        
-        Respond with just the name of the garment (e.g., "red shirt", "blue jeans", "black dress", "white jacket").
-        
-        If no clear garment is visible, respond with "no garment detected"."""
-        
-        # Create the image part for the GenerativeModel
-        image_part = {
-            "mime_type": "image/png",
-            "data": img_byte_arr.getvalue()
+        return {
+            'dominant_color': dominant_color,
+            'apl': apl,
         }
-        
-        response = await asyncio.get_event_loop().run_in_executor(
-            None, 
-            lambda: model.generate_content([prompt, image_part])
-        )
-        
-        if response.text:
-            garment_description = response.text.strip().lower()
-            print(f"Gemini identified garment: {garment_description}")
-            
-            if "no garment" in garment_description or "not" in garment_description:
-                print("No garment detected by Gemini, using original image.")
-                return pil_image, None
-            else:
-                print(f"Garment detected: {garment_description}. Applying classical segmentation.")
-                return apply_fast_classical_segmentation(pil_image, use_downscaling)
-        else:
-            print(f"No text response from {effective_model_name}. Using classical segmentation fallback.")
-            return apply_fast_classical_segmentation(pil_image, use_downscaling)
-
     except Exception as e:
-        print(f"Error during Gemini ({effective_model_name}) analysis: {e}. Using classical segmentation fallback.")
-        traceback.print_exc()
-        return apply_fast_classical_segmentation(pil_image, use_downscaling)
+        st.warning(f"Could not extract features for {image_name}: {e}")
+        return None
 
-def apply_fast_classical_segmentation(pil_image, use_downscaling=True):
-    """
-    Apply optimized classical computer vision segmentation.
-    Uses downscaling for speed and simplified GrabCut.
-    """
+# --- Gemini API and Segmentation ---
+
+async def identify_garment_characteristics(pil_image, api_key, model_name="gemini-2.5-pro-preview-06-05", max_retries=2):
+    """Lightweight function to identify garment characteristics."""
+    if pil_image is None or not api_key:
+        return "Invalid input"
+    
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel(model_name)
+    
+    for attempt in range(max_retries):
+        try:
+            prompt = "Provide a short, high-level description of the main garment in this image. Focus on type, main color, and general fit only. For example: 'Blue slim-fit t-shirt' or 'Loose-fitting black dress'."
+            response = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: model.generate_content(
+                    [prompt, pil_image],
+                    request_options={"timeout": 200}
+                )
+            )
+            return response.text.strip()
+        except Exception as e:
+            print(f"Error during garment identification (attempt {attempt + 1}): {e}")
+            if attempt >= max_retries - 1:
+                return f"Failed to identify garment after {max_retries} attempts."
+            await asyncio.sleep(2)
+    return "Unknown Garment"
+
+async def segment_garment(pil_image, target_garment, api_key, model_name="gemini-2.5-pro-preview-06-05", max_retries=0, base_delay=2):
+    """Segments the primary garment from a PIL image using the GeminiSegmentationModel."""
+    if not api_key:
+        return pil_image, None, "API key not provided"
+
+    print(f"Attempting segmentation with module using {model_name}...")
+    model = GeminiSegmentationModel(api_key=api_key, model_id=model_name)
+
+    # The model's segment_image method requires a file path.
+    # We'll save the PIL image to a temporary file.
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp_f:
+        pil_image.convert("RGB").save(temp_f.name, format='PNG')
+        temp_path = temp_f.name
+
     try:
-        original_size = pil_image.size
-        
-        # Downscale for faster processing
-        if use_downscaling:
-            max_dimension = 400  # Reduce from original size for speed
-            ratio = min(max_dimension / original_size[0], max_dimension / original_size[1])
-            if ratio < 1:
-                new_size = (int(original_size[0] * ratio), int(original_size[1] * ratio))
-                pil_working = pil_image.resize(new_size, Image.Resampling.LANCZOS)
-            else:
-                pil_working = pil_image
-        else:
-            pil_working = pil_image
-        
-        # Convert PIL to OpenCV format
-        img_np = np.array(pil_working.convert('RGB'))
-        img_cv = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
-        
-        height, width = img_cv.shape[:2]
-        
-        # Create a mask initialized to probable background
-        mask = np.zeros((height, width), np.uint8)
-        
-        # Define a rectangle around the center area (where garments typically are)
-        margin_x = int(width * 0.25)  # Slightly more aggressive centering
-        margin_y = int(height * 0.2)
-        rect = (margin_x, margin_y, width - 2*margin_x, height - 2*margin_y)
-        
-        # Initialize foreground and background models
-        bgd_model = np.zeros((1, 65), np.float64)
-        fgd_model = np.zeros((1, 65), np.float64)
-        
-        # Apply GrabCut algorithm with fewer iterations for speed
-        cv2.grabCut(img_cv, mask, rect, bgd_model, fgd_model, 3, cv2.GC_INIT_WITH_RECT)  # Reduced from 5 to 3 iterations
-        
-        # Create binary mask (foreground and probable foreground = 1, others = 0)
-        mask2 = np.where((mask == 2) | (mask == 0), 0, 1).astype('uint8')
-        
-        # Simplified morphological operations
-        kernel = np.ones((2,2), np.uint8)  # Smaller kernel for speed
-        mask2 = cv2.morphologyEx(mask2, cv2.MORPH_CLOSE, kernel)
-        
-        # Resize mask back to original size if we downscaled
-        if use_downscaling and pil_working.size != original_size:
-            mask_pil_small = Image.fromarray(mask2 * 255, mode='L')
-            mask_pil = mask_pil_small.resize(original_size, Image.Resampling.NEAREST)
-        else:
-            mask_pil = Image.fromarray(mask2 * 255, mode='L')
-        
-        # Create segmented image with black background
-        black_bg = Image.new("RGB", original_size, (0, 0, 0))
-        segmented_image = Image.composite(pil_image.convert("RGB"), black_bg, mask_pil)
-        
-        processing_note = " (downscaled)" if use_downscaling else ""
-        print(f"Fast classical segmentation applied successfully{processing_note}.")
-        return segmented_image, mask_pil
-        
-    except Exception as e:
-        print(f"Fast classical segmentation failed: {e}. Using original image.")
-        return pil_image, None
+        loop = asyncio.get_event_loop()
+        for attempt in range(max_retries + 1):
+            try:
+                if attempt > 0:
+                    print(f"Retry attempt {attempt}/{max_retries}...")
 
-def calculate_histogram_similarity_score(features1, features2):
-    """ Parameter top_n_peaks_extracted removed as it was unused. """
-    if not features1 or not features2:
-        return 0
-    channel_scores = []
-    channel_weights = {'L': 0.4, 'a': 0.3, 'b': 0.3}
-    for ch_name in ['L', 'a', 'b']:
-        stats1 = features1.get(f'{ch_name}_stats')
-        stats2 = features2.get(f'{ch_name}_stats')
-        peaks1_list = features1.get(f'{ch_name}_peaks', [])
-        peaks2_list = features2.get(f'{ch_name}_peaks', [])
-        if not stats1 or not stats2:
-            channel_scores.append(0)
-            continue
-        mean_diff = abs(stats1['mean'] - stats2['mean'])
-        mean_sim = max(0.0, 1.0 - (mean_diff / 255.0))
-        std_dev_diff = abs(stats1['std_dev'] - stats2['std_dev'])
-        std_dev_sim = max(0.0, 1.0 - (std_dev_diff / 128.0))
-        peak_bins1 = {p['bin'] for p in peaks1_list}
-        peak_bins2 = {p['bin'] for p in peaks2_list}
-        intersection_size = len(peak_bins1.intersection(peak_bins2))
-        union_size = len(peak_bins1.union(peak_bins2))
-        peak_overlap_sim = intersection_size / union_size if union_size > 0 else 0.0
-        current_channel_sim = (mean_sim * 0.4) + (std_dev_sim * 0.2) + (peak_overlap_sim * 0.4)
-        channel_scores.append(current_channel_sim * channel_weights[ch_name])
-    overall_similarity = sum(channel_scores) * 100
-    return max(0.0, min(100.0, overall_similarity))
+                # The segment_image method is synchronous, so we run it in an executor.
+                segmentation_data, _ = await loop.run_in_executor(
+                    None, model.segment_image, temp_path, target_garment
+                )
 
-def delta_e_cie76(lab1, lab2):
-    """Calculates Delta E (CIEDE1976) between two CIELAB colors."""
-    return np.sqrt(np.sum((np.array(lab1) - np.array(lab2))**2))
+                if segmentation_data:
+                    # The module found segments. We need to combine the masks.
+                    img_size_hw = (pil_image.height, pil_image.width)
+                    combined_mask_np = np.zeros(img_size_hw, dtype=np.uint8)
+                    labels = []
+                    for mask_np, label in segmentation_data:
+                        if mask_np is not None and mask_np.shape == combined_mask_np.shape:
+                            combined_mask_np = np.maximum(combined_mask_np, mask_np)
+                        labels.append(label)
 
-def calculate_dominant_color_similarity_score(palette1_rgb, palette2_rgb, significant_delta_e_threshold=50.0):
-    """
-    Calculates a deterministic similarity score between two dominant color palettes (lists of RGB tuples).
-    Uses CIELAB Delta E for perceptual color difference.
-    Returns a score between 0 and 100.
-    """
-    if not palette1_rgb or not palette2_rgb:
-        # If one palette is empty and the other is not, it's a 0% match.
-        # If both are empty, it could be argued it's a 100% match of 'nothing', but 0% is safer for feature comparison.
-        return 0.0
+                    if np.any(combined_mask_np):
+                        mask_pil = Image.fromarray(combined_mask_np, 'L')
+                        # Use our existing apply_mask to get a transparent background
+                        segmented_pil = apply_mask(pil_image, mask_pil)
+                        description = ", ".join(labels) or target_garment
+                        print("✅ Segmentation successful with module.")
+                        return segmented_pil, mask_pil, description
 
-    # Convert palettes to CIELAB
-    # Individual color conversion needed for cvtColor with single pixels
-    palette1_lab = [cv2.cvtColor(np.uint8([[color]]), cv2.COLOR_RGB2LAB)[0][0] for color in palette1_rgb]
-    palette2_lab = [cv2.cvtColor(np.uint8([[color]]), cv2.COLOR_RGB2LAB)[0][0] for color in palette2_rgb]
+                print(f"Segmentation attempt {attempt + 1} with module failed: no objects found.")
+                if attempt >= max_retries:
+                    break
+                await asyncio.sleep(base_delay * (2 ** attempt))
 
-    def get_palette_similarity(p1_lab, p2_lab):
-        if not p1_lab: # If p1 is empty, similarity is 1.0 if p2 is also empty, else 0.0 (handled by initial check)
-            return 1.0 if not p2_lab else 0.0
-        if not p2_lab: # If p2 is empty but p1 is not, similarity is 0.0
-            return 0.0
-            
-        total_color_similarity = 0.0
-        for c1_lab in p1_lab:
-            min_dist = float('inf')
-            for c2_lab in p2_lab:
-                dist = delta_e_cie76(c1_lab, c2_lab)
-                if dist < min_dist:
-                    min_dist = dist
-            # Similarity: 1.0 for Delta E = 0, down to 0.0 for Delta E >= threshold
-            color_sim = max(0.0, 1.0 - (min_dist / significant_delta_e_threshold))
-            total_color_similarity += color_sim
-        return total_color_similarity / len(p1_lab)
+            except Exception as e:
+                print(f"Error during module segmentation (attempt {attempt + 1}): {e}")
+                if attempt >= max_retries:
+                    break
+                await asyncio.sleep(base_delay * (2 ** attempt))
+    finally:
+        os.remove(temp_path)
 
-    # Calculate similarity from palette1 to palette2 and vice-versa
-    sim_p1_to_p2 = get_palette_similarity(palette1_lab, palette2_lab)
-    sim_p2_to_p1 = get_palette_similarity(palette2_lab, palette1_lab)
+    # If all attempts fail, use a fallback generic mask.
+    print("All segmentation attempts failed. Using generic segmentation as final fallback.")
+    generic_mask = create_generic_mask(pil_image)
+    generic_segmented = apply_mask(pil_image, generic_mask)
+    return generic_segmented, generic_mask, "Fallback Generic Mask"
 
-    # Average the two directional similarities for a final score
-    final_similarity_score = (sim_p1_to_p2 + sim_p2_to_p1) / 2.0 * 100.0
-    return max(0.0, min(100.0, final_similarity_score))
+def create_generic_mask(pil_image):
+    """Creates a generic, centered rectangular mask as a fallback."""
+    width, height = pil_image.size
+    mask = Image.new('L', (width, height), 0)
+    draw = ImageDraw.Draw(mask)
+    # Create a rectangle covering the central 80% of the image
+    x0, y0 = int(width * 0.1), int(height * 0.1)
+    x1, y1 = int(width * 0.9), int(height * 0.9)
+    draw.rectangle([x0, y0, x1, y1], fill=255)
+    print("Created generic centered fallback mask.")
+    return mask
+
+def apply_mask(image, mask):
+    """Applies a mask to an image."""
+    if mask is None: return image
+    if image.size != mask.size:
+        mask = mask.resize(image.size, Image.Resampling.LANCZOS)
+    if mask.mode != 'L': mask = mask.convert('L')
+        
+    img_rgba = image.convert("RGBA")
+    img_rgba.putalpha(mask)
+    return img_rgba
+
+# --- Similarity Calculation ---
+
+def calculate_ciede1976_color_similarity(color1, color2):
+    """Calculates color similarity based on CIEDE1976 delta E."""
+    if color1 is None or color2 is None: return 0.0
+    lab1 = rgb2lab(np.uint8(np.asarray([[color1]])))
+    lab2 = rgb2lab(np.uint8(np.asarray([[color2]])))
+    delta_e = deltaE_cie76(lab1, lab2)[0][0]
+    return max(0.0, 100.0 - delta_e)
 
 def calculate_apl_similarity_score(apl1, apl2, normalization_range=127.5):
-    """
-    Calculates a deterministic similarity score between two Average Picture Level (APL) values.
-    APL is typically the mean of the L* channel (0-255 range expected here).
-    normalization_range is the absolute difference at which similarity becomes 0.
-    Returns a score between 0 and 100.
-    """
-    if apl1 is None or apl2 is None: # Should not happen if features are extracted
-        return 0.0
-    
+    """Calculates similarity between two Average Pixel Luminance values."""
+    if apl1 is None or apl2 is None: return 0.0
     similarity = max(0.0, 1.0 - (abs(apl1 - apl2) / normalization_range))
     return max(0.0, min(100.0, similarity * 100.0))
 
-async def perform_deterministic_analysis(image1_pil_orig, image2_pil_orig, image3_pil_orig, api_key, fast_mode=False, use_downscaling=True):
-    if fast_mode:
-        segmentation_method = "Fast Classical CV"
-    else:
-        segmentation_method = "Hybrid (Gemini + Classical CV)" if api_key else "Classical Computer Vision"
-    
-    st.write(f"### Garment Segmentation Stage (Using {segmentation_method})")
-    
-    segmentation_tasks = [
-        segment_garment(image1_pil_orig, api_key=api_key, fast_mode=fast_mode, use_downscaling=use_downscaling),
-        segment_garment(image2_pil_orig, api_key=api_key, fast_mode=fast_mode, use_downscaling=use_downscaling),
-        segment_garment(image3_pil_orig, api_key=api_key, fast_mode=fast_mode, use_downscaling=use_downscaling)
-    ]
-    
-    results = await asyncio.gather(*segmentation_tasks)
-    
-    image1_to_process, mask1 = results[0]
-    image2_to_process, mask2 = results[1]
-    image3_to_process, mask3 = results[2]
+def calculate_ciede2000_color_similarity(color1_rgb, color2_rgb):
+    """Calculates color similarity using the perceptually uniform CIEDE2000 metric."""
+    if color1_rgb is None or color2_rgb is None:
+        return 0.0
+    lab1 = rgb2lab(np.uint8(np.asarray([[color1_rgb]])))
+    lab2 = rgb2lab(np.uint8(np.asarray([[color2_rgb]])))
+    delta_e = deltaE_ciede2000(lab1, lab2)[0][0]
+    # Convert delta E to similarity (0-100, higher is more similar). Scale factor 1.5 gives a useful range.
+    return max(0.0, 100.0 - (delta_e * 1.5))
 
-    # Display segmentation results
-    segmentation_success_count = 0
-    segmentation_details = []
+# --- Main Analysis Pipeline ---
+
+async def perform_deterministic_analysis(image1_pil_orig, image2_pil_orig, image3_pil_orig, api_key):
+    """The main function to perform the full analysis pipeline."""
+    st.write("### Gemini AI Segmentation Analysis")
+    if not api_key:
+        st.error("❌ Google AI API Key is required. Cannot proceed.")
+        return None
+
+    with st.spinner("Resizing images for consistent processing..."):
+        image1_pil = resize_image_to_fixed_size(image1_pil_orig)
+        image2_pil = resize_image_to_fixed_size(image2_pil_orig)
+        image3_pil = resize_image_to_fixed_size(image3_pil_orig)
+
+    with st.spinner("Step 1: Identifying reference garment..."):
+        ref_desc = await identify_garment_characteristics(image1_pil, api_key)
+        if "Failed" in ref_desc or "Unknown" in ref_desc:
+            st.error(f"Could not identify reference garment: {ref_desc}")
+            return None
+    st.success(f"**Reference Garment**: `{ref_desc}`")
+
+    with st.spinner(f"Step 2: Segmenting all images based on description..."):
+        results = []
+        for idx, img in enumerate([image1_pil, image2_pil, image3_pil], start=1):
+            st.write(f"Segmenting image {idx} / 3 ...")
+            try:
+                res = await segment_garment(img, ref_desc, api_key)
+            except Exception as e:
+                res = e
+            results.append(res)
+
+    processed_results = []
+    for i, res in enumerate(results):
+        img_pil = [image1_pil, image2_pil, image3_pil][i]
+        if isinstance(res, Exception) or res[1] is None:
+            st.warning(f"Segmentation failed for image {i+1}. Reason: {res[2] if isinstance(res, tuple) else res}. Using original image for analysis.")
+            processed_results.append((img_pil, None, "Fallback")) # Use original image
+        else:
+            processed_results.append(res)
     
-    if mask1 is not None:
-        segmentation_success_count += 1
-        # Calculate segmentation coverage (percentage of image that is segmented garment)
-        mask_coverage = np.mean(np.array(mask1)) / 255 * 100
-        segmentation_details.append(f"Reference: {mask_coverage:.1f}% of image segmented")
-    else:
-        st.warning("Reference Image: Using original image (segmentation failed)")
-        segmentation_details.append("Reference: Segmentation failed")
+    segmented_img1, mask1, _ = processed_results[0]
+    segmented_img2, mask2, _ = processed_results[1]
+    segmented_img3, mask3, _ = processed_results[2]
+
+    if mask1 is None:
+        st.warning("Could not segment reference image. Analysis will be based on the full image.")
+        # We can still proceed using the unsegmented image.
+        # The feature extraction will run on the full image.
+
+    with st.spinner("Step 3: Extracting features and comparing..."):
+        features1 = extract_features(image1_pil, mask1, "Reference")
+        features2 = extract_features(image2_pil, mask2, "Generated 1")
+        features3 = extract_features(image3_pil, mask3, "Generated 2")
+
+        if not features1:
+            st.error("Could not extract features from reference image. Aborting.")
+            return None
+
+        # Comparisons
+        def compare_features(f1, f2):
+            if not f2:
+                return {"ciede2000": 0.0}
+            c2000 = calculate_ciede2000_color_similarity(f1['dominant_color'], f2['dominant_color'])
+            return {"ciede2000": c2000}
+
+        comp_1_2 = compare_features(features1, features2)
+        comp_1_3 = compare_features(features1, features3)
+
+    # --- Display Results ---
+    st.write("---")
+    st.write("### 📊 Comparison Results")
+    
+    final_images_col, scores_col = st.columns([2, 1])
+
+    with final_images_col:
+        st.image([segmented_img1 or image1_pil, segmented_img2 or image2_pil, segmented_img3 or image3_pil], 
+                 caption=["Reference (Segmented)", "Generated 1 (Segmented)", "Generated 2 (Segmented)"], use_column_width=True)
+
+    with scores_col:
+        with st.expander("**Reference vs. Generated 1**", expanded=True):
+            st.metric("CIEDE2000 Color Similarity", f"{comp_1_2['ciede2000']:.1f}%")
         
-    if mask2 is not None:
-        segmentation_success_count += 1
-        mask_coverage = np.mean(np.array(mask2)) / 255 * 100
-        segmentation_details.append(f"Generated 1: {mask_coverage:.1f}% of image segmented")
-    else:
-        st.warning("Generated Image 1: Using original image (segmentation failed)")
-        segmentation_details.append("Generated 1: Segmentation failed")
-        
-    if mask3 is not None:
-        segmentation_success_count += 1
-        mask_coverage = np.mean(np.array(mask3)) / 255 * 100
-        segmentation_details.append(f"Generated 2: {mask_coverage:.1f}% of image segmented")
-    else:
-        st.warning("Generated Image 2: Using original image (segmentation failed)")
-        segmentation_details.append("Generated 2: Segmentation failed")
-    
-    if segmentation_success_count > 0:
-        st.success(f"✅ Successfully segmented {segmentation_success_count}/3 images using {segmentation_method}")
-        # Show segmentation details in an expander
-        with st.expander("📊 Segmentation Details"):
-            for detail in segmentation_details:
-                st.write(f"• {detail}")
-    else:
-        st.warning("⚠️ All segmentation attempts failed. Analysis will proceed with original images.")
+        st.write("---")
 
-    st.write("### Feature Extraction Stage")
-    st.write("Extracting dominant colors from processed images...")
-    ref_dom_colors = extract_dominant_colors(image1_to_process, k=5)
-    gen1_dom_colors = extract_dominant_colors(image2_to_process, k=5)
-    gen2_dom_colors = extract_dominant_colors(image3_to_process, k=5)
+        with st.expander("**Reference vs. Generated 2**", expanded=True):
+            st.metric("CIEDE2000 Color Similarity", f"{comp_1_3['ciede2000']:.1f}%")
 
-    st.write("Extracting CIELAB histogram features (including L* mean for APL) from processed images...")
-    ref_hist_features = extract_histogram_features(image1_to_process)
-    gen1_hist_features = extract_histogram_features(image2_to_process)
-    gen2_hist_features = extract_histogram_features(image3_to_process)
+    return { "comp_1_2": comp_1_2, "comp_1_3": comp_1_3 }
 
-    results_gen1 = {}
-    results_gen2 = {}
-    ref_apl = None 
-    if ref_hist_features:
-        ref_apl = ref_hist_features.get('L_stats', {}).get('mean')
-        if ref_apl is None:
-            st.error("Reference APL (L* mean) could not be extracted from (segmented) histogram features.")
-    else:
-        st.error("Reference histogram features (incl. APL) could not be extracted from (segmented) image. Analysis may be incomplete.")
-
-    # --- Process Generated Image 1 ---
-    if ref_dom_colors and gen1_dom_colors:
-        dom_score1 = calculate_dominant_color_similarity_score(ref_dom_colors, gen1_dom_colors)
-        results_gen1["dominant_color_evaluation"] = {"percentage_match": dom_score1, "is_match_human_perception": dom_score1 >= 85.0}
-    else:
-        st.warning("Could not calculate dominant color score for Gen 1 (ref vs gen1) due to missing features.")
-        results_gen1["dominant_color_evaluation"] = {"percentage_match": 0, "is_match_human_perception": False}
-
-    if ref_hist_features and gen1_hist_features:
-        hist_score1 = calculate_histogram_similarity_score(ref_hist_features, gen1_hist_features)
-        results_gen1["histogram_feature_evaluation"] = {"percentage_match": hist_score1, "is_match_human_perception": hist_score1 >= 85.0}
-    else:
-        st.warning("Could not calculate histogram feature score for Gen 1 (ref vs gen1) due to missing features.")
-        results_gen1["histogram_feature_evaluation"] = {"percentage_match": 0, "is_match_human_perception": False}
-    
-    gen1_apl = gen1_hist_features.get('L_stats', {}).get('mean') if gen1_hist_features else None
-    if ref_apl is not None and gen1_apl is not None:
-        apl_score1 = calculate_apl_similarity_score(ref_apl, gen1_apl)
-        results_gen1["luminance_apl_evaluation"] = {"percentage_match": apl_score1, "is_match_human_perception": apl_score1 >= 85.0}
-    else:
-        st.warning("Could not calculate APL score for Gen 1 (ref vs gen1) due to missing APL values.")
-        results_gen1["luminance_apl_evaluation"] = {"percentage_match": 0, "is_match_human_perception": False}
-
-    # --- Process Generated Image 2 ---
-    if ref_dom_colors and gen2_dom_colors:
-        dom_score2 = calculate_dominant_color_similarity_score(ref_dom_colors, gen2_dom_colors)
-        results_gen2["dominant_color_evaluation"] = {"percentage_match": dom_score2, "is_match_human_perception": dom_score2 >= 85.0}
-    else:
-        st.warning("Could not calculate dominant color score for Gen 2 (ref vs gen2) due to missing features.")
-        results_gen2["dominant_color_evaluation"] = {"percentage_match": 0, "is_match_human_perception": False}
-
-    if ref_hist_features and gen2_hist_features:
-        hist_score2 = calculate_histogram_similarity_score(ref_hist_features, gen2_hist_features)
-        results_gen2["histogram_feature_evaluation"] = {"percentage_match": hist_score2, "is_match_human_perception": hist_score2 >= 85.0}
-    else:
-        st.warning("Could not calculate histogram feature score for Gen 2 (ref vs gen2) due to missing features.")
-        results_gen2["histogram_feature_evaluation"] = {"percentage_match": 0, "is_match_human_perception": False}
-
-    gen2_apl = gen2_hist_features.get('L_stats', {}).get('mean') if gen2_hist_features else None
-    if ref_apl is not None and gen2_apl is not None:
-        apl_score2 = calculate_apl_similarity_score(ref_apl, gen2_apl)
-        results_gen2["luminance_apl_evaluation"] = {"percentage_match": apl_score2, "is_match_human_perception": apl_score2 >= 85.0}
-    else:
-        st.warning("Could not calculate APL score for Gen 2 (ref vs gen2) due to missing APL values.")
-        results_gen2["luminance_apl_evaluation"] = {"percentage_match": 0, "is_match_human_perception": False}
-        
-    return {
-        "generation1": results_gen1, 
-        "generation2": results_gen2,
-        "processed_images": [image1_to_process, image2_to_process, image3_to_process],
-        "masks": [mask1, mask2, mask3]
-    }
-
-# Helper functions should be defined here, in the global scope
-def display_summary_metric(label, eval_data, metric_key="percentage_match"):
-    if eval_data and isinstance(eval_data.get(metric_key), (int, float)):
-        st.write(f"**{label}:** {eval_data[metric_key]:.2f}%")
-    else:
-        st.write(f"**{label}:** N/A (analysis incomplete or data missing)")
-
-def get_average_score(analysis_data):
-    if not analysis_data: return -1
-    scores = []
-    dom_eval = analysis_data.get("dominant_color_evaluation")
-    if dom_eval and isinstance(dom_eval.get("percentage_match"), (int, float)):
-        scores.append(dom_eval.get("percentage_match"))
-    hist_eval = analysis_data.get("histogram_feature_evaluation")
-    if hist_eval and isinstance(hist_eval.get("percentage_match"), (int, float)):
-        scores.append(hist_eval.get("percentage_match"))
-    apl_eval = analysis_data.get("luminance_apl_evaluation")
-    if apl_eval and isinstance(apl_eval.get("percentage_match"), (int, float)):
-        scores.append(apl_eval.get("percentage_match"))
-    return sum(scores) / len(scores) if scores else -1
+# --- Streamlit UI ---
 
 def main():
-    st.set_page_config(layout="wide") # Use wide layout
-    st.title("Advanced Garment Comparison Tool")
+    st.set_page_config(layout="wide", page_title="Garment Comparison Tool")
+    
+    st.title("👕 Garment Visual Comparison Tool")
+    st.write("Upload a reference garment image and two generated variants to compare them using Gemini-powered segmentation and analysis.")
 
-    st.sidebar.header("API Configuration")
-    api_key = st.sidebar.text_input("Enter Google AI API Key", type="password")
-    
-    st.sidebar.header("Segmentation Settings")
-    fast_mode = st.sidebar.checkbox("Fast Mode", value=True, help="Skip Gemini analysis and use only classical segmentation for speed")
-    use_downscaling = st.sidebar.checkbox("Use Downscaling", value=True, help="Process smaller images for faster segmentation")
-    
-    st.sidebar.info(
-        "This tool uses a hybrid approach for garment segmentation. "
-        "Fast Mode skips Gemini analysis and uses only classical segmentation for speed. "
-        "Downscaling processes smaller images for faster results."
-    )
+    with st.expander("About The Analysis Methods"):
+        st.subheader("Dominant Color Extraction")
+        st.markdown("""
+        Dominant color extraction provides a high-level summary of the garment's main colors.
+        - **Method**: Clustering algorithms, most commonly k-means, are applied to the pixel color values within the segmented garment region. The centroids of the resulting clusters represent the dominant colors.
+        - **Tools**: Python libraries OpenCV (`cv2.kmeans`) and scikit-learn (`sklearn.cluster.KMeans`) offer robust implementations of k-means.
+        - **Process**:
+            1. Read the input and output images.
+            2. Perform garment segmentation on both images.
+            3. For each segmented garment, convert the pixel data (typically RGB values) into a list suitable for clustering.
+            4. Apply k-means algorithm to find a predefined number of 'k' cluster centers (dominant colors). The choice of 'k' can be fixed or determined dynamically.
+            5. The resulting 'k' centroids (e.g., in RGB or CIELAB space) from the input garment are then compared against those from the output garment. This comparison can be done by calculating perceptual color difference metrics (discussed later) between corresponding dominant colors or by assessing the similarity of the sets of dominant colors.
+        - **Relevance**: This method is useful for a quick, overall assessment of color fidelity.
+        """)
 
-    st.write("""
-    Upload three images to compare: one reference outfit and two generated versions.
-    **Segmentation Method**: The tool uses a hybrid approach:
-    1. **With API Key**: Gemini identifies the garment, then applies classical CV segmentation
-    2. **Without API Key**: Uses classical computer vision segmentation (GrabCut algorithm)
-    
-    The deterministic analysis then proceeds based on the segmented images for:
-    1.  **Dominant Color Palette Match**
-    2.  **CIELAB Histogram Feature Match**
-    3.  **Luminance (APL) Match**
-    """)
-    
-    st.warning("⚠️ **Deterministic Analysis with Segmentation**: This tool provides quantitative scores on segmented garments. Segmentation may not be perfect. Interpret results based on scores and visual inspection.")
-    
-    uploaded_file1 = st.file_uploader("Choose Reference Garment", type=['png', 'jpg', 'jpeg'], key="file1")
-    uploaded_file2 = st.file_uploader("Choose Generated Garment 1", type=['png', 'jpg', 'jpeg'], key="file2")
-    uploaded_file3 = st.file_uploader("Choose Generated Garment 2", type=['png', 'jpg', 'jpeg'], key="file3")
-    
-    if uploaded_file1 and uploaded_file2 and uploaded_file3:
-        st.header("Original Uploaded Images")
-        col1_orig, col2_orig, col3_orig = st.columns(3)
+    with st.sidebar:
+        st.header("Controls")
+        google_api_key = st.text_input("Google AI API Key", type="password", help="Required for Gemini analysis.")
         
-        image1_pil_orig = Image.open(uploaded_file1)
-        with col1_orig:
-            st.write("Reference Garment")
-            st.image(image1_pil_orig, use_column_width=True)
-        
-        image2_pil_orig = Image.open(uploaded_file2)
-        with col2_orig:
-            st.write("Generated Garment 1")
-            st.image(image2_pil_orig, use_column_width=True)
-            
-        image3_pil_orig = Image.open(uploaded_file3)
-        with col3_orig:
-            st.write("Generated Garment 2")
-            st.image(image3_pil_orig, use_column_width=True)
-        
-        if st.button("Compare Garments"): 
-            if fast_mode:
-                segmentation_method = "Fast Classical CV"
+        st.header("Upload Images")
+        image_file_1 = st.file_uploader("Reference Garment", type=['png', 'jpg', 'jpeg'])
+        image_file_2 = st.file_uploader("Generated Garment 1", type=['png', 'jpg', 'jpeg'])
+        image_file_3 = st.file_uploader("Generated Garment 2", type=['png', 'jpg', 'jpeg'])
+
+    col1, col2, col3 = st.columns(3)
+    if image_file_1:
+        col1.image(image_file_1, caption="Reference Image", use_column_width=True)
+    if image_file_2:
+        col2.image(image_file_2, caption="Generated Image 1", use_column_width=True)
+    if image_file_3:
+        col3.image(image_file_3, caption="Generated Image 2", use_column_width=True)
+
+    if st.button("Run Analysis", use_container_width=True):
+        if image_file_1 and image_file_2 and image_file_3:
+            if google_api_key:
+                image1 = Image.open(image_file_1)
+                image2 = Image.open(image_file_2)
+                image3 = Image.open(image_file_3)
+                
+                with st.spinner("Performing full analysis... This may take a minute."):
+                    asyncio.run(perform_deterministic_analysis(image1, image2, image3, google_api_key))
             else:
-                segmentation_method = "Hybrid (Gemini + Classical CV)" if api_key else "Classical Computer Vision"
-            
-            processing_note = ""
-            if fast_mode:
-                processing_note = " (Fast Mode - Direct Classical Segmentation)"
-            elif use_downscaling:
-                processing_note = " (with Downscaling for Speed)"
-            
-            with st.spinner(f"Performing analysis using {segmentation_method} segmentation{processing_note}..."):
-                # Run the async function using asyncio.run()
-                analysis_results = asyncio.run(perform_deterministic_analysis(
-                    image1_pil_orig, image2_pil_orig, image3_pil_orig, 
-                    api_key=api_key, fast_mode=fast_mode, use_downscaling=use_downscaling
-                ))
-                
-                processed_images = analysis_results.get("processed_images")
-                if processed_images and len(processed_images) == 3:
-                    st.header(f"🔍 Segmentation Results ({segmentation_method})")
-                    
-                    # Display original vs segmented comparison
-                    st.subheader("Original vs Segmented Comparison")
-                    
-                    for i, (original, segmented) in enumerate(zip([image1_pil_orig, image2_pil_orig, image3_pil_orig], processed_images)):
-                        labels = ["Reference Garment", "Generated Garment 1", "Generated Garment 2"]
-                        
-                        st.write(f"**{labels[i]}**")
-                        col_orig, col_seg = st.columns(2)
-                        
-                        with col_orig:
-                            st.write("Original")
-                            st.image(original, use_column_width=True)
-                        
-                        with col_seg:
-                            st.write("Segmented")
-                            st.image(segmented, use_column_width=True)
-                        
-                        st.write("---")  # Separator line
-                    
-                    # Also show all segmented images in a row for easy comparison
-                    st.subheader("Segmented Images for Analysis")
-                    col1_proc, col2_proc, col3_proc = st.columns(3)
-                    with col1_proc:
-                        st.write("Reference (Segmented)")
-                        st.image(processed_images[0], use_column_width=True)
-                    with col2_proc:
-                        st.write("Generated 1 (Segmented)")
-                        st.image(processed_images[1], use_column_width=True)
-                    with col3_proc:
-                        st.write("Generated 2 (Segmented)")
-                        st.image(processed_images[2], use_column_width=True)
-                else:
-                    st.warning("Could not retrieve processed images for display.")
-
-                masks = analysis_results.get("masks")
-                if masks and any(mask is not None for mask in masks): 
-                    st.header(f"🎭 Segmentation Masks ({segmentation_method})")
-                    st.write("*White areas show the detected garment region*")
-                    col1_mask, col2_mask, col3_mask = st.columns(3)
-                    titles = ["Reference Mask", "Generated 1 Mask", "Generated 2 Mask"]
-                    for i, mask_img in enumerate(masks):
-                        with [col1_mask, col2_mask, col3_mask][i]:
-                            st.write(titles[i])
-                            if mask_img:
-                                st.image(mask_img, use_column_width=True, channels="L")
-                            else:
-                                st.caption("Segmentation failed - using original image for analysis.")
-                else: 
-                    st.info("Segmentation masks are not available for display.")
-                
-                st.write("## Comparison Results - Generated Image 1")
-                gen1_analysis_data = analysis_results.get("generation1")
-                if gen1_analysis_data:
-                    dom_eval_g1 = gen1_analysis_data.get("dominant_color_evaluation")
-                    if dom_eval_g1:
-                        st.write("**Dominant Color Palette Match**")
-                        percentage_dom_g1 = dom_eval_g1.get("percentage_match", 0.0)
-                        match_dom_g1 = dom_eval_g1.get("is_match_human_perception", False)
-                        score_dom_g1_text = f"{percentage_dom_g1:.2f}" if isinstance(percentage_dom_g1, (float, int)) else "N/A"
-                        if match_dom_g1:
-                            st.success(f"✓ Similar ({score_dom_g1_text}% score)")
-                        else:
-                            st.error(f"✗ Different ({score_dom_g1_text}% score)")
-                        if isinstance(percentage_dom_g1, (float, int)): st.progress(percentage_dom_g1 / 100)
-                    else:
-                        st.warning("Dominant color evaluation data missing for Generated Image 1.")
-                    hist_eval_g1 = gen1_analysis_data.get("histogram_feature_evaluation")
-                    if hist_eval_g1:
-                        st.write("**Histogram Feature Match**")
-                        percentage_hist_g1 = hist_eval_g1.get("percentage_match", 0.0)
-                        match_hist_g1 = hist_eval_g1.get("is_match_human_perception", False)
-                        score_hist_g1_text = f"{percentage_hist_g1:.2f}" if isinstance(percentage_hist_g1, (float, int)) else "N/A"
-                        if match_hist_g1:
-                            st.success(f"✓ Similar ({score_hist_g1_text}% score)")
-                        else:
-                            st.error(f"✗ Different ({score_hist_g1_text}% score)")
-                        if isinstance(percentage_hist_g1, (float, int)): st.progress(percentage_hist_g1 / 100)
-                    else:
-                        st.warning("Histogram feature evaluation data missing for Generated Image 1.")
-                    apl_eval_g1 = gen1_analysis_data.get("luminance_apl_evaluation")
-                    if apl_eval_g1:
-                        st.write("**Luminance (APL) Match**")
-                        percentage_apl_g1 = apl_eval_g1.get("percentage_match", 0.0) 
-                        match_apl_g1 = apl_eval_g1.get("is_match_human_perception", False)
-                        score_apl_g1_text = f"{percentage_apl_g1:.2f}" if isinstance(percentage_apl_g1, (float, int)) else "N/A"
-                        if match_apl_g1:
-                            st.success(f"✓ Similar Brightness ({score_apl_g1_text}% score)")
-                        else:
-                            st.error(f"✗ Different Brightness ({score_apl_g1_text}% score)")
-                        if isinstance(percentage_apl_g1, (float, int)): 
-                            st.progress(percentage_apl_g1 / 100)
-                    else:
-                        st.warning("Luminance (APL) evaluation data missing for Generated Image 1.")
-                else:
-                    st.error("Analysis for Generated Image 1 failed or was incomplete.")
-
-                st.write("## Comparison Results - Generated Image 2")
-                gen2_analysis_data = analysis_results.get("generation2")
-                if gen2_analysis_data:
-                    dom_eval_g2 = gen2_analysis_data.get("dominant_color_evaluation")
-                    if dom_eval_g2:
-                        st.write("**Dominant Color Palette Match**")
-                        percentage_dom_g2 = dom_eval_g2.get("percentage_match", 0.0)
-                        match_dom_g2 = dom_eval_g2.get("is_match_human_perception", False)
-                        score_dom_g2_text = f"{percentage_dom_g2:.2f}" if isinstance(percentage_dom_g2, (float, int)) else "N/A"
-                        if match_dom_g2:
-                            st.success(f"✓ Similar ({score_dom_g2_text}% score)")
-                        else:
-                            st.error(f"✗ Different ({score_dom_g2_text}% score)")
-                        if isinstance(percentage_dom_g2, (float, int)): st.progress(percentage_dom_g2 / 100)
-                    else:
-                        st.warning("Dominant color evaluation data missing for Generated Image 2.")
-                    hist_eval_g2 = gen2_analysis_data.get("histogram_feature_evaluation")
-                    if hist_eval_g2:
-                        st.write("**Histogram Feature Match**")
-                        percentage_hist_g2 = hist_eval_g2.get("percentage_match", 0.0)
-                        match_hist_g2 = hist_eval_g2.get("is_match_human_perception", False)
-                        score_hist_g2_text = f"{percentage_hist_g2:.2f}" if isinstance(percentage_hist_g2, (float, int)) else "N/A"
-                        if match_hist_g2:
-                            st.success(f"✓ Similar ({score_hist_g2_text}% score)")
-                        else:
-                            st.error(f"✗ Different ({score_hist_g2_text}% score)")
-                        if isinstance(percentage_hist_g2, (float, int)): st.progress(percentage_hist_g2 / 100)
-                    else:
-                        st.warning("Histogram feature evaluation data missing for Generated Image 2.")
-                    apl_eval_g2 = gen2_analysis_data.get("luminance_apl_evaluation")
-                    if apl_eval_g2:
-                        st.write("**Luminance (APL) Match**")
-                        percentage_apl_g2 = apl_eval_g2.get("percentage_match", 0.0)
-                        match_apl_g2 = apl_eval_g2.get("is_match_human_perception", False)
-                        score_apl_g2_text = f"{percentage_apl_g2:.2f}" if isinstance(percentage_apl_g2, (float, int)) else "N/A"
-                        if match_apl_g2:
-                            st.success(f"✓ Similar Brightness ({score_apl_g2_text}% score)")
-                        else:
-                            st.error(f"✗ Different Brightness ({score_apl_g2_text}% score)")
-                        if isinstance(percentage_apl_g2, (float, int)): 
-                            st.progress(percentage_apl_g2 / 100)
-                    else:
-                        st.warning("Luminance (APL) evaluation data missing for Generated Image 2.")
-                else:
-                    st.error("Analysis for Generated Image 2 failed or was incomplete.")
-                
-                st.write("## Summary of Deterministic Metrics")
-                if gen1_analysis_data and gen2_analysis_data:
-                    st.subheader("Generated Image 1 vs. Reference")
-                    display_summary_metric("Dominant Color Palette Match", gen1_analysis_data.get("dominant_color_evaluation"))
-                    display_summary_metric("Histogram Feature Match", gen1_analysis_data.get("histogram_feature_evaluation"))
-                    display_summary_metric("Luminance (APL) Match", gen1_analysis_data.get("luminance_apl_evaluation"))
-                    st.write("---") 
-                    st.subheader("Generated Image 2 vs. Reference")
-                    display_summary_metric("Dominant Color Palette Match", gen2_analysis_data.get("dominant_color_evaluation"))
-                    display_summary_metric("Histogram Feature Match", gen2_analysis_data.get("histogram_feature_evaluation"))
-                    display_summary_metric("Luminance (APL) Match", gen2_analysis_data.get("luminance_apl_evaluation"))
-                    st.write("---")
-                    st.write("### Comparison Insight (Based on Average of All Scores)")
-                    avg_score_g1 = get_average_score(gen1_analysis_data)
-                    avg_score_g2 = get_average_score(gen2_analysis_data)
-                    if avg_score_g1 == -1 and avg_score_g2 == -1:
-                        st.info("Average scores not available to provide a comparison insight.")
-                    elif avg_score_g1 > avg_score_g2:
-                        st.info(f"Generated Image 1 has a higher average score ({avg_score_g1:.2f}%) than Generated Image 2 ({avg_score_g2:.2f}%).")
-                    elif avg_score_g2 > avg_score_g1:
-                        st.info(f"Generated Image 2 has a higher average score ({avg_score_g2:.2f}%) than Generated Image 1 ({avg_score_g1:.2f}%).")
-                    elif avg_score_g1 != -1: 
-                         st.info(f"Both generated images have an equal average score ({avg_score_g1:.2f}%).")
-                    else: 
-                        st.info("Could not provide a comparison insight based on average scores.")
-                else:
-                    st.info("Full summary metrics cannot be displayed as analysis data for one or both generated images is missing or incomplete.")
+                st.error("Please provide a Google AI API Key in the sidebar.")
+        else:
+            st.warning("Please upload all three images.")
 
 if __name__ == "__main__":
     main()
