@@ -2,7 +2,6 @@ import cv2
 import numpy as np
 from PIL import Image as PILImage
 from matplotlib import pyplot as plt
-from google import genai
 import google.generativeai as genai
 import base64
 import json
