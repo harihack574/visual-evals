@@ -9,7 +9,13 @@ import tempfile
 import os
 from segmentation_module import GeminiSegmentationModel
 
-from utils import apply_mask, calculate_ciede2000_color_similarity, create_generic_mask
+from utils import (
+    apply_mask,
+    calculate_ciede2000_color_similarity,
+    create_generic_mask,
+    parse_json_from_text,
+    display_pattern_results,
+)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -82,11 +88,20 @@ def extract_features(pil_image, mask, image_name=""):
 
 # --- Gemini API and Segmentation ---
 
+DUMMY_GARMENT_CHARACTERISTICS = {
+    "garments": [
+        "Mustard yellow flowy Anarkali dress with embroidered V-neck",
+        "Bright pink/red patterned dupatta",
+    ]
+}
 
 async def identify_garment_characteristics(
     pil_image, api_key, model_name="gemini-2.5-flash-preview-05-20", max_retries=2
 ):
     """Function to identify all garments in the reference image."""
+    if "garments" in DUMMY_GARMENT_CHARACTERISTICS:
+        return DUMMY_GARMENT_CHARACTERISTICS
+
     if pil_image is None or not api_key:
         return "Invalid input"
 
@@ -103,7 +118,12 @@ Keep descriptions short and concise. Format as a numbered list. Examples:
 2. Black straight-leg jeans  
 3. White casual sneakers
 
-Focus on the most visible and prominent garments."""
+Focus on the most visible and prominent garments. Return the output in JSON format in the form of:
+{
+    "garments": ["garment1", "garment2", "garment3"...]
+}.
+
+Query:"""
 
             response = await asyncio.get_event_loop().run_in_executor(
                 None,
@@ -111,7 +131,8 @@ Focus on the most visible and prominent garments."""
                     model=model_name, contents=[prompt, pil_image]
                 ),
             )
-            return response.text.strip()
+            response_text = parse_json_from_text(response.text.strip())
+            return response_text
         except Exception as e:
             print(f"Error during garment identification (attempt {attempt + 1}): {e}")
             if attempt >= max_retries - 1:
@@ -120,12 +141,233 @@ Focus on the most visible and prominent garments."""
     return "Unknown Garments"
 
 
+DUMMY_ANALYSIS_PATTERN = {
+    "Generated Image 1": [
+        {
+            "garment": "Mustard yellow flowy Anarkali dress with embroidered V-neck",
+            "patterns": {
+                "patterns": [
+                    {
+                        "pattern_type": "solid",
+                        "pattern_colors": ["mustard yellow"],
+                        "orientation": "allover",
+                        "spacing": "uniform",
+                    },
+                    {
+                        "pattern_type": "embroidered",
+                        "pattern_colors": ["red", "gold"],
+                        "orientation": "placement",
+                        "spacing": "dense",
+                    },
+                    {
+                        "pattern_type": "chevron",
+                        "pattern_colors": ["magenta", "pink", "gold"],
+                        "orientation": "linear",
+                        "spacing": "medium",
+                    },
+                ]
+            },
+        },
+        {
+            "garment": "Bright pink/red patterned dupatta",
+            "patterns": {
+                "patterns": [
+                    {
+                        "pattern_type": "chevron",
+                        "pattern_colors": ["bright pink", "light pink", "gold"],
+                        "orientation": "diagonal",
+                        "spacing": "tight",
+                    },
+                    {
+                        "pattern_type": "metallic",
+                        "pattern_colors": ["gold"],
+                        "orientation": "border",
+                        "spacing": "other",
+                    },
+                ]
+            },
+        },
+    ],
+    "Generated Image 2": [
+        {
+            "garment": "Mustard yellow flowy Anarkali dress with embroidered V-neck",
+            "patterns": {
+                "patterns": [
+                    {
+                        "pattern_type": "solid",
+                        "pattern_colors": ["mustard yellow"],
+                        "orientation": "allover",
+                        "spacing": "uniform",
+                    },
+                    {
+                        "pattern_type": "embroidered",
+                        "pattern_colors": ["magenta", "gold"],
+                        "orientation": "placement",
+                        "spacing": "dense",
+                    },
+                    {
+                        "pattern_type": "chevron",
+                        "pattern_colors": ["magenta", "gold"],
+                        "orientation": "diagonal",
+                        "spacing": "medium",
+                    },
+                ]
+            },
+        },
+        {
+            "garment": "Bright pink/red patterned dupatta",
+            "patterns": {
+                "patterns": [
+                    {
+                        "pattern_type": "chevron",
+                        "pattern_colors": ["pink", "gold"],
+                        "orientation": "diagonal",
+                        "spacing": "tight",
+                    },
+                    {
+                        "pattern_type": "stripes",
+                        "pattern_colors": ["gold"],
+                        "orientation": "border",
+                        "spacing": "separated",
+                    },
+                ]
+            },
+        },
+    ],
+    "Reference Image": [
+        {
+            "garment": "Mustard yellow flowy Anarkali dress with embroidered V-neck",
+            "patterns": {
+                "patterns": [
+                    {
+                        "pattern_type": "solid",
+                        "pattern_colors": ["mustard yellow"],
+                        "orientation": "allover",
+                        "spacing": "uniform",
+                    },
+                    {
+                        "pattern_type": "embroidered",
+                        "pattern_colors": ["pink", "red", "gold"],
+                        "orientation": "placement",
+                        "spacing": "dense",
+                    },
+                    {
+                        "pattern_type": "chevron",
+                        "pattern_colors": ["red", "pink", "gold"],
+                        "orientation": "diagonal",
+                        "spacing": "medium",
+                    },
+                    {
+                        "pattern_type": "metallic",
+                        "pattern_colors": ["gold"],
+                        "orientation": "border",
+                        "spacing": "uniform",
+                    },
+                ]
+            },
+        },
+        {
+            "garment": "Bright pink/red patterned dupatta",
+            "patterns": {
+                "patterns": [
+                    {
+                        "pattern_type": "chevron",
+                        "pattern_colors": ["bright pink", "red", "gold"],
+                        "orientation": "diagonal",
+                        "spacing": "medium",
+                    },
+                    {
+                        "pattern_type": "metallic",
+                        "pattern_colors": ["gold"],
+                        "orientation": "border",
+                        "spacing": "structured",
+                    },
+                ]
+            },
+        },
+    ],
+}
+
+
+async def analyze_pattern_descriptions_v2(
+    pil_image,
+    image_name,
+    api_key,
+    model_name="gemini-2.5-flash-preview-05-20",
+    max_retries=2,
+    garments_list=[],
+) -> list[dict]:
+    """Function to analyze and describe all patterns visible in an image."""
+    if image_name in DUMMY_ANALYSIS_PATTERN:
+        return DUMMY_ANALYSIS_PATTERN[image_name]
+
+    if pil_image is None or not api_key:
+        return f"Invalid input for {image_name}"
+
+    client = genai.Client(api_key=api_key)
+    results = []
+
+    if len(garments_list) == 0:
+        garments_list = [""]
+
+    for garment in garments_list:
+        prompt = (
+            f"""Analyze this garment image and list the patterns visible {f"for {garment}" if garment else ""}.
+
+    For each pattern, provide only these four attributes:
+    * Pattern type: (one of the following: stripes, florals, geometric, solid, plaid, dots, checks, paisley, animal_print, tribal, abstract, botanical, damask, houndstooth, chevron, tie_dye, ombre, camouflage, argyle, toile, ikat, batik, herringbone, gingham, tartan, windowpane, pinstripe, lace, embroidered, applique, beaded, sequined, metallic, mesh, crochet, knit, quilted, textured, other)
+    * Pattern colors: (list the main colors used in the pattern)
+    * Orientation: (one of the following: horizontal, vertical, diagonal, random, radial, circular, spiral, concentric, symmetrical, asymmetrical, scattered, border, allover, placement, directional, mirrored, cascading, crosshatch, interlocking, overlapping, graduated, clustered, linear, grid, alternating, flowing, other)
+    * Spacing: (one of the following: tight, medium, wide, irregular, dense, sparse, compact, loose, even, uneven, variable, graduated, overlapping, touching, separated, clustered, scattered, uniform, progressive, rhythmic, structured, random, other)
+
+    If multiple distinct patterns exist, list each separately.
+    Return the output in JSON format in the form of:"""
+            + """
+    ```json
+    {
+        "patterns": [
+            {"pattern_type": "pattern_type", "pattern_colors": ["color1", "color2"], "orientation": "orientation", "spacing": "spacing"},
+            ...
+        ]
+    }
+    ```
+    Query:
+    """
+        )
+
+        for attempt in range(max_retries):
+            try:
+                response = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: client.models.generate_content(
+                        model=model_name, contents=[prompt, pil_image]
+                    ),
+                )
+                results.append(
+                    {
+                        "garment": garment,
+                        "patterns": parse_json_from_text(response.text.strip()),
+                    }
+                )
+                break
+            except Exception as e:
+                print(
+                    f"Error during pattern analysis for {image_name} (attempt {attempt + 1}): {e}"
+                )
+                if attempt >= max_retries - 1:
+                    return f"Failed to analyze patterns for {image_name} after {max_retries} attempts."
+                await asyncio.sleep(2)
+
+    return results
+
+
 async def analyze_pattern_descriptions(
     pil_image,
     image_name,
     api_key,
     model_name="gemini-2.5-flash-preview-05-20",
     max_retries=2,
+    garments_list=[],
 ):
     """Function to analyze and describe all patterns visible in an image."""
     if pil_image is None or not api_key:
@@ -208,6 +450,66 @@ Respond with ONLY "Yes" if the patterns match well, or "No" if they don't match.
     return "No"
 
 
+async def compare_pattern_agreement_v2(
+    reference_image,
+    generated_image,
+    garment_list,
+    api_key,
+    model_name="gemini-2.5-flash-preview-05-20",
+    max_retries=2,
+):
+    """Function to compare pattern descriptions b/w reference and generated images"""
+    if not api_key or not reference_image or not generated_image:
+        return "No"
+
+    client = genai.Client(api_key=api_key)
+
+    try:
+        prompt = (
+            f"""Compare these two images and determine if they represent the same or very similar patterns:
+
+Mark first image as REFERENCE IMAGE and second image as GENERATED IMAGE.
+
+Compare the patterns of the following garments:
+{"\n".join([f"- {g}" for g in garment_list])}
+
+
+Analyze if they match based on:
+- Pattern type (must be the same or very similar)
+- Pattern colors (should be similar or complementary)
+- Orientation (should match)
+- Spacing (should be similar)
+
+Respond with JSON format in the form of:"""
+            + """```json
+[
+    {
+        "garment": "Garment name",
+        "agreement": "Yes/No",
+        "reason": "Reason for the agreement/disagreement"
+    },
+    ...
+]
+```"""
+        )
+
+        response = await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: client.models.generate_content(
+                model=model_name, contents=[prompt]
+            ),
+        )
+        result = response.text.strip().lower()
+        return parse_json_from_text(result)
+    except Exception as e:
+        print(f"Error during pattern comparison: {e}")
+        return {
+            "garment": "Garment name",
+            "agreement": "No",
+            "reason": "Failed to analyze patterns",
+        }
+
+
 async def segment_garment(
     pil_image,
     target_garment,
@@ -288,9 +590,12 @@ async def segment_garment(
 
 # --- Main Analysis Pipeline ---
 
-
 async def perform_deterministic_analysis(
-    image1_pil_orig, image2_pil_orig, image3_pil_orig, api_key, gemini_model = "gemini-2.5-flash-preview-05-20"
+    image1_pil_orig,
+    image2_pil_orig,
+    image3_pil_orig,
+    api_key,
+    gemini_model="gemini-2.5-flash-preview-05-20",
 ):
     """The main function to perform the full analysis pipeline."""
     st.write("### Gemini AI Segmentation Analysis")
@@ -310,81 +615,129 @@ async def perform_deterministic_analysis(
             return None
 
     with st.expander("**Reference Garments Identified**", expanded=True):
-        st.write(ref_desc)
+        garments_list = ref_desc["garments"]
+        display_text = f"""Found {len(garments_list)} garments:\n\n{"\n".join([f"- {g}" for g in garments_list])}"""
+        st.write(display_text)
 
-    with st.spinner("Step 2: Analyzing patterns on all images..."):
-        pattern_tasks = [
-            analyze_pattern_descriptions(image1_pil, "Reference Image", api_key, model_name=gemini_model),
-            analyze_pattern_descriptions(image2_pil, "Generated Image 1", api_key, model_name=gemini_model),
-            analyze_pattern_descriptions(image3_pil, "Generated Image 2", api_key, model_name=gemini_model),
-        ]
-        pattern_results = await asyncio.gather(*pattern_tasks)
+    # with st.spinner("Step 2: Analyzing patterns on all images..."):
+    #     pattern_tasks = [
+    #         analyze_pattern_descriptions_v2(
+    #             image1_pil,
+    #             "Reference Image",
+    #             api_key,
+    #             model_name=gemini_model,
+    #             garments_list=garments_list,
+    #         ),
+    #         analyze_pattern_descriptions_v2(
+    #             image2_pil,
+    #             "Generated Image 1",
+    #             api_key,
+    #             model_name=gemini_model,
+    #             garments_list=garments_list,
+    #         ),
+    #         analyze_pattern_descriptions_v2(
+    #             image3_pil,
+    #             "Generated Image 2",
+    #             api_key,
+    #             model_name=gemini_model,
+    #             garments_list=garments_list,
+    #         ),
+    #     ]
+    #     pattern_results = await asyncio.gather(*pattern_tasks)
 
-    with st.expander("**Pattern Analysis Results**", expanded=True):
-        pattern_col1, pattern_col2, pattern_col3 = st.columns(3)
+    # with st.expander("**Pattern Analysis Results**", expanded=True):
+    #     pattern_col1, pattern_col2, pattern_col3 = st.columns(3)
 
-        with pattern_col1:
-            st.subheader("Reference Image Patterns")
-            st.write(pattern_results[0])
+    #     with pattern_col1:
+    #         st.subheader("Reference Image Patterns")
+    #         st.write(display_pattern_results(pattern_results[0]))
 
-        with pattern_col2:
-            st.subheader("Generated Image 1 Patterns")
-            st.write(pattern_results[1])
+    #     with pattern_col2:
+    #         st.subheader("Generated Image 1 Patterns")
+    #         st.write(display_pattern_results(pattern_results[1]))
 
-        with pattern_col3:
-            st.subheader("Generated Image 2 Patterns")
-            st.write(pattern_results[2])
+    #     with pattern_col3:
+    #         st.subheader("Generated Image 2 Patterns")
+    #         st.write(display_pattern_results(pattern_results[2]))
 
-    with st.spinner("Comparing pattern agreement..."):
-        agreement_tasks = [
-            compare_pattern_agreement(pattern_results[0], pattern_results[1], api_key, model_name=gemini_model),
-            compare_pattern_agreement(pattern_results[0], pattern_results[2], api_key, model_name=gemini_model),
-        ]
-        agreement_results = await asyncio.gather(*agreement_tasks)
+    # with st.spinner("Comparing pattern agreement..."):
+    #     agreement_tasks = [
+    #         compare_pattern_agreement_v2(
+    #             display_pattern_results(pattern_results[0]),
+    #             display_pattern_results(pattern_results[1]),
+    #             api_key,
+    #             model_name=gemini_model,
+    #         ),
+    #         compare_pattern_agreement_v2(
+    #             display_pattern_results(pattern_results[0]),
+    #             display_pattern_results(pattern_results[2]),
+    #             api_key,
+    #             model_name=gemini_model,
+    #         ),
+    #     ]
+    #     agreement_results = await asyncio.gather(*agreement_tasks)
 
-    with st.expander("**Pattern Agreement Analysis**", expanded=True):
-        agreement_col1, agreement_col2 = st.columns(2)
+    # with st.expander("**Pattern Agreement Analysis**", expanded=True):
+    #     agreement_col1, agreement_col2 = st.columns(2)
 
-        with agreement_col1:
-            st.subheader("Reference vs Generated 1")
-            agreement_color_1 = "green" if agreement_results[0] == "Yes" else "red"
-            st.markdown(
-                f"**Pattern Agreement:** <span style='color:{agreement_color_1}'>{agreement_results[0]}</span>",
-                unsafe_allow_html=True,
-            )
+    #     with agreement_col1:
+    #         st.subheader("Reference vs Generated 1")
+    #         agreement_color_1 = "green" if agreement_results[0] == "Yes" else "red"
+    #         st.markdown(
+    #             f"**Pattern Agreement:** <span style='color:{agreement_color_1}'>{agreement_results[0]}</span>",
+    #             unsafe_allow_html=True,
+    #         )
 
-        with agreement_col2:
-            st.subheader("Reference vs Generated 2")
-            agreement_color_2 = "green" if agreement_results[1] == "Yes" else "red"
-            st.markdown(
-                f"**Pattern Agreement:** <span style='color:{agreement_color_2}'>{agreement_results[1]}</span>",
-                unsafe_allow_html=True,
-            )
+    #     with agreement_col2:
+    #         st.subheader("Reference vs Generated 2")
+    #         agreement_color_2 = "green" if agreement_results[1] == "Yes" else "red"
+    #         st.markdown(
+    #             f"**Pattern Agreement:** <span style='color:{agreement_color_2}'>{agreement_results[1]}</span>",
+    #             unsafe_allow_html=True,
+    #         )
 
-    with st.spinner(f"Step 3: Segmenting all images based on description..."):
-        results = []
-        for idx, img in enumerate([image1_pil, image2_pil, image3_pil], start=1):
-            st.write(f"Segmenting image {idx} / 3 ...")
-            try:
-                res = await segment_garment(img, ref_desc, api_key, model_name=gemini_model)
-            except Exception as e:
-                res = e
-            results.append(res)
 
-    processed_results = []
-    for i, res in enumerate(results):
-        img_pil = [image1_pil, image2_pil, image3_pil][i]
-        if isinstance(res, Exception) or res[1] is None:
-            st.warning(
-                f"Segmentation failed for image {i+1}. Reason: {res[2] if isinstance(res, tuple) else res}. Using original image for analysis."
-            )
-            processed_results.append((img_pil, None, "Fallback"))  # Use original image
-        else:
-            processed_results.append(res)
+    if "images_dump/segmented_img1.png" not in os.listdir("images_dump"):
+        with st.spinner("Step 3: Segmenting all images based on description..."):
+            results = []
+            for idx, img in enumerate([image1_pil, image2_pil, image3_pil], start=1):
+                st.write(f"Segmenting image {idx} / 3 ...")
+                try:
+                    res = await segment_garment(
+                        img, ref_desc, api_key, model_name=gemini_model
+                    )
+                except Exception as e:
+                    res = e
+                results.append(res)
 
-    segmented_img1, mask1, _ = processed_results[0]
-    segmented_img2, mask2, _ = processed_results[1]
-    segmented_img3, mask3, _ = processed_results[2]
+        processed_results = []
+        for i, res in enumerate(results):
+            img_pil = [image1_pil, image2_pil, image3_pil][i]
+            if isinstance(res, Exception) or res[1] is None:
+                st.warning(
+                    f"Segmentation failed for image {i+1}. Reason: {res[2] if isinstance(res, tuple) else res}. Using original image for analysis."
+                )
+                processed_results.append((img_pil, None, "Fallback"))  # Use original image
+            else:
+                processed_results.append(res)
+
+        segmented_img1, mask1, _ = processed_results[0]
+        segmented_img2, mask2, _ = processed_results[1]
+        segmented_img3, mask3, _ = processed_results[2]
+
+        segmented_img1.save("images_dump/segmented_img1.png")
+        segmented_img2.save("images_dump/segmented_img2.png")
+        segmented_img3.save("images_dump/segmented_img3.png")
+        mask1.save("images_dump/mask1.png")
+        mask2.save("images_dump/mask2.png")
+        mask3.save("images_dump/mask3.png")
+    else:
+        segmented_img1 = Image.open("images_dump/segmented_img1.png")
+        segmented_img2 = Image.open("images_dump/segmented_img2.png")
+        segmented_img3 = Image.open("images_dump/segmented_img3.png")
+        mask1 = Image.open("images_dump/mask1.png")
+        mask2 = Image.open("images_dump/mask2.png")
+        mask3 = Image.open("images_dump/mask3.png")
 
     if mask1 is None:
         st.warning(
@@ -526,7 +879,11 @@ def main():
                 with st.spinner("Performing full analysis... This may take a minute."):
                     asyncio.run(
                         perform_deterministic_analysis(
-                            image1, image2, image3, google_api_key, gemini_model=gemini_model
+                            image1,
+                            image2,
+                            image3,
+                            google_api_key,
+                            gemini_model=gemini_model,
                         )
                     )
             else:
