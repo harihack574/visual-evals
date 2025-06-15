@@ -290,7 +290,7 @@ async def segment_garment(
 
 
 async def perform_deterministic_analysis(
-    image1_pil_orig, image2_pil_orig, image3_pil_orig, api_key
+    image1_pil_orig, image2_pil_orig, image3_pil_orig, api_key, gemini_model = "gemini-2.5-flash-preview-05-20"
 ):
     """The main function to perform the full analysis pipeline."""
     st.write("### Gemini AI Segmentation Analysis")
@@ -304,7 +304,7 @@ async def perform_deterministic_analysis(
         image3_pil = resize_image_to_fixed_size(image3_pil_orig)
 
     with st.spinner("Step 1: Identifying reference garment..."):
-        ref_desc = await identify_garment_characteristics(image1_pil, api_key)
+        ref_desc = await identify_garment_characteristics(image1_pil, api_key, model_name=gemini_model)
         if "Failed" in ref_desc or "Unknown" in ref_desc:
             st.error(f"Could not identify reference garments: {ref_desc}")
             return None
@@ -314,9 +314,9 @@ async def perform_deterministic_analysis(
 
     with st.spinner("Step 2: Analyzing patterns on all images..."):
         pattern_tasks = [
-            analyze_pattern_descriptions(image1_pil, "Reference Image", api_key),
-            analyze_pattern_descriptions(image2_pil, "Generated Image 1", api_key),
-            analyze_pattern_descriptions(image3_pil, "Generated Image 2", api_key),
+            analyze_pattern_descriptions(image1_pil, "Reference Image", api_key, model_name=gemini_model),
+            analyze_pattern_descriptions(image2_pil, "Generated Image 1", api_key, model_name=gemini_model),
+            analyze_pattern_descriptions(image3_pil, "Generated Image 2", api_key, model_name=gemini_model),
         ]
         pattern_results = await asyncio.gather(*pattern_tasks)
 
@@ -337,8 +337,8 @@ async def perform_deterministic_analysis(
 
     with st.spinner("Comparing pattern agreement..."):
         agreement_tasks = [
-            compare_pattern_agreement(pattern_results[0], pattern_results[1], api_key),
-            compare_pattern_agreement(pattern_results[0], pattern_results[2], api_key),
+            compare_pattern_agreement(pattern_results[0], pattern_results[1], api_key, model_name=gemini_model),
+            compare_pattern_agreement(pattern_results[0], pattern_results[2], api_key, model_name=gemini_model),
         ]
         agreement_results = await asyncio.gather(*agreement_tasks)
 
@@ -366,7 +366,7 @@ async def perform_deterministic_analysis(
         for idx, img in enumerate([image1_pil, image2_pil, image3_pil], start=1):
             st.write(f"Segmenting image {idx} / 3 ...")
             try:
-                res = await segment_garment(img, ref_desc, api_key)
+                res = await segment_garment(img, ref_desc, api_key, model_name=gemini_model)
             except Exception as e:
                 res = e
             results.append(res)
@@ -492,6 +492,10 @@ def main():
         google_api_key = st.text_input(
             "Google AI API Key", type="password", help="Required for Gemini analysis."
         )
+        gemini_model = st.selectbox(
+            "Gemini Model",
+            ["gemini-2.5-flash-preview-05-20", "gemini-2.5-pro-preview-06-05"],
+        )
 
         st.header("Upload Images")
         image_file_1 = st.file_uploader(
@@ -522,7 +526,7 @@ def main():
                 with st.spinner("Performing full analysis... This may take a minute."):
                     asyncio.run(
                         perform_deterministic_analysis(
-                            image1, image2, image3, google_api_key
+                            image1, image2, image3, google_api_key, gemini_model=gemini_model
                         )
                     )
             else:
