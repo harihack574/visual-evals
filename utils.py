@@ -2,6 +2,7 @@ from PIL import Image, ImageDraw
 import numpy as np
 from skimage.color import deltaE_cie76, deltaE_ciede2000, rgb2lab
 from skimage.metrics import structural_similarity as ssim
+import json
 
 
 def create_generic_mask(pil_image):
@@ -136,3 +137,88 @@ def calculate_ssim_similarity(image1, image2, mask1=None, mask2=None):
     except Exception as e:
         print(f"Error calculating SSIM: {e}")
         return {"ssim": 0.0}
+
+
+def display_pattern_results(pattern_result) -> str:
+    """Given a pattern object as following, return a string for display:
+    'patterns': {'patterns': [{'pattern_type': 'embroidered floral/foliage', 'pattern_colors': ['deep pink', 'light pink', 'gold'], 'orientation': 'random', 'spacing': 'tight'}, {'pattern_type': 'wavy lines', 'pattern_colors': ['red', 'gold'], 'orientation': 'diagonal', 'spacing': 'medium'}]}}, {'garment': 'Mustard yellow flowy Anarkali dress with embroidered V-neck', 'patterns': {'patterns': [{'pattern_type': 'Solid color - no pattern', 'pattern_colors': ['Mustard yellow'], 'orientation': 'N/A', 'spacing': 'N/A'}, {'pattern_type': 'Embroidery / Floral', 'pattern_colors': ['Red', 'Light Pink', 'Cream', 'Gold'], 'orientation': 'Symmetrical / Border', 'spacing': 'Tight'}, {'pattern_type': 'Wavy', 'pattern_colors': ['Red', 'Gold'], 'orientation': 'Diagonal', 'spacing': 'Medium'}]}}, {'garment': 'Bright pink/red patterned dupatta', 'patterns': {'patterns': [{'pattern_type': 'wavy stripes', 'pattern_colors': ['bright pink/red', 'light pink/gold/silver'], 'orientation': 'diagonal', 'spacing': 'medium'}]}}, {'garment': 'Bright pink/red patterned dupatta', 'patterns': {'patterns': [{'pattern_type': 'wavy stripes', 'pattern_colors': ['Bright pink/red', 'Metallic gold'], 'orientation': 'diagonal', 'spacing': 'tight'}]}}
+    """
+    if not pattern_result:
+        return "No pattern data available"
+
+    display_text = ""
+
+    # Handle case where pattern_result is a dict with 'garment' and 'patterns' keys
+    if isinstance(pattern_result, dict):
+        if "garment" in pattern_result:
+            display_text += f"**{pattern_result['garment']}**\n\n"
+            patterns_data = pattern_result.get("patterns", {})
+        else:
+            patterns_data = pattern_result
+
+        # Extract patterns list
+        patterns_list = (
+            patterns_data.get("patterns", []) if isinstance(patterns_data, dict) else []
+        )
+
+        if not patterns_list:
+            display_text += "No patterns detected\n"
+        else:
+            for i, pattern in enumerate(patterns_list, 1):
+                display_text += (
+                    f"{i}. **{pattern.get('pattern_type', 'Unknown pattern')}**\n"
+                )
+
+                # Colors
+                colors = pattern.get("pattern_colors", [])
+                if colors:
+                    colors_str = ", ".join(colors)
+                    display_text += f"   • Colors: {colors_str}\n"
+
+                # Orientation
+                orientation = pattern.get("orientation", "N/A")
+                display_text += f"   • Orientation: {orientation}\n"
+
+                # Spacing
+                spacing = pattern.get("spacing", "N/A")
+                display_text += f"   • Spacing: {spacing}\n\n"
+
+    # Handle case where pattern_result is a list of garment pattern objects
+    elif isinstance(pattern_result, list):
+        for item in pattern_result:
+            if isinstance(item, dict):
+                display_text += display_pattern_results(item) + "\n---\n\n"
+
+    return display_text.strip()
+
+
+def parse_json_from_text(text) -> dict | None:
+    """Parses JSON from gemini response text.
+    Example:
+    ```json
+        {
+            "garments": [
+                "Yellow loose-fit Anarkali kurta with embroidered neckline",
+                "Red patterned dupatta/scarf"
+            ]
+        }
+    ```
+    """
+    try:
+        # Remove any non-JSON content
+        text = text.strip()
+        # Find the first occurrence of ```json
+        json_start = text.find("```json")
+        if json_start == -1:
+            return None
+        # Find the next occurrence of ```
+        json_end = text.find("```", json_start + 7)
+        if json_end == -1:
+            return None
+        # Extract the JSON content
+        json_content = text[json_start + 7 : json_end].strip()
+        # Parse the JSON
+        return json.loads(json_content)
+    except Exception as e:
+        print(f"Error parsing JSON: {e}")
+        return None
