@@ -1,0 +1,6 @@
+[server]
+runOnSave = true
+watchFileSystem = true
+
+[browser]
+gatherUsageStats = false 
