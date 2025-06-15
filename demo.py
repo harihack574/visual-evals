@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 # --- Image Processing and Feature Extraction ---
 
+
 def resize_image_to_fixed_size(pil_image):
     """Resizes an image to a fixed size of (384, 512) for all processing."""
     fixed_size = (384, 512)
@@ -35,6 +36,7 @@ def resize_image_to_fixed_size(pil_image):
     print(f"Resized image from {pil_image.size} to {fixed_size} for processing")
     return resized_image
 
+
 def extract_features(pil_image, mask, image_name=""):
     """Extracts dominant color, texture histogram, and APL from a PIL image, optionally using a mask."""
     if pil_image is None:
@@ -42,29 +44,33 @@ def extract_features(pil_image, mask, image_name=""):
         return None
     try:
         # Ensure image is RGB for feature extraction
-        image_rgb = pil_image.convert('RGB')
+        image_rgb = pil_image.convert("RGB")
         img_np = np.array(image_rgb)
-        
+
         mask_np = None
         if mask is not None:
             # Ensure mask is L and the same size as the image
             if mask.size != pil_image.size:
                 mask = mask.resize(pil_image.size, Image.Resampling.LANCZOS)
-            if mask.mode != 'L':
-                mask = mask.convert('L')
+            if mask.mode != "L":
+                mask = mask.convert("L")
             mask_np = np.array(mask)
 
         # Dominant Color
         if mask_np is not None:
             pixels = np.float32(img_np[mask_np > 0])
             if pixels.size == 0:
-                st.warning(f"No pixels in mask for {image_name}. Cannot extract features.")
+                st.warning(
+                    f"No pixels in mask for {image_name}. Cannot extract features."
+                )
                 return None
         else:
             pixels = np.float32(img_np.reshape(-1, 3))
 
         criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 10, 1.0)
-        _, _, centers = cv2.kmeans(pixels, 1, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS)
+        _, _, centers = cv2.kmeans(
+            pixels, 1, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS
+        )
         dominant_color = tuple(np.uint8(centers[0]))
 
         # Average Pixel Luminance (APL)
@@ -75,22 +81,26 @@ def extract_features(pil_image, mask, image_name=""):
             apl = np.mean(gray_img)
 
         return {
-            'dominant_color': dominant_color,
-            'apl': apl,
+            "dominant_color": dominant_color,
+            "apl": apl,
         }
     except Exception as e:
         st.warning(f"Could not extract features for {image_name}: {e}")
         return None
 
+
 # --- Gemini API and Segmentation ---
 
-async def identify_garment_characteristics(pil_image, api_key, model_name="gemini-2.5-pro-preview-06-05", max_retries=2):
+
+async def identify_garment_characteristics(
+    pil_image, api_key, model_name="gemini-2.5-flash-preview-05-20", max_retries=2
+):
     """Function to identify all garments in the reference image."""
     if pil_image is None or not api_key:
         return "Invalid input"
-    
+
     client = genai.Client(api_key=api_key)
-    
+
     for attempt in range(max_retries):
         try:
             prompt = """Identify ALL garments visible in this image. For each garment, provide a brief description including:
@@ -103,13 +113,12 @@ Keep descriptions short and concise. Format as a numbered list. Examples:
 3. White casual sneakers
 
 Focus on the most visible and prominent garments."""
-            
+
             response = await asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda: client.models.generate_content(
-                    model=model_name,
-                    contents=[prompt, pil_image]
-                )
+                    model=model_name, contents=[prompt, pil_image]
+                ),
             )
             return response.text.strip()
         except Exception as e:
@@ -119,13 +128,20 @@ Focus on the most visible and prominent garments."""
             await asyncio.sleep(2)
     return "Unknown Garments"
 
-async def analyze_pattern_descriptions(pil_image, image_name, api_key, model_name="gemini-2.5-pro-preview-06-05", max_retries=2):
+
+async def analyze_pattern_descriptions(
+    pil_image,
+    image_name,
+    api_key,
+    model_name="gemini-2.5-flash-preview-05-20",
+    max_retries=2,
+):
     """Function to analyze and describe all patterns visible in an image."""
     if pil_image is None or not api_key:
         return f"Invalid input for {image_name}"
-    
+
     client = genai.Client(api_key=api_key)
-    
+
     for attempt in range(max_retries):
         try:
             prompt = """Analyze this garment image and list the patterns visible. For each pattern, provide only these four attributes:
@@ -136,29 +152,37 @@ async def analyze_pattern_descriptions(pil_image, image_name, api_key, model_nam
 * Spacing: (tight, medium, wide, irregular, etc.)
 
 Format as a simple bulleted list. If multiple distinct patterns exist, list each separately. If it's a solid color with no pattern, state "Solid color - no pattern"."""
-            
+
             response = await asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda: client.models.generate_content(
-                    model=model_name,
-                    contents=[prompt, pil_image]
-                )
+                    model=model_name, contents=[prompt, pil_image]
+                ),
             )
             return response.text.strip()
         except Exception as e:
-            print(f"Error during pattern analysis for {image_name} (attempt {attempt + 1}): {e}")
+            print(
+                f"Error during pattern analysis for {image_name} (attempt {attempt + 1}): {e}"
+            )
             if attempt >= max_retries - 1:
                 return f"Failed to analyze patterns for {image_name} after {max_retries} attempts."
             await asyncio.sleep(2)
     return f"Unknown patterns for {image_name}"
 
-async def compare_pattern_agreement(reference_pattern, generated_pattern, api_key, model_name="gemini-2.5-pro-preview-06-05", max_retries=2):
+
+async def compare_pattern_agreement(
+    reference_pattern,
+    generated_pattern,
+    api_key,
+    model_name="gemini-2.5-flash-preview-05-20",
+    max_retries=2,
+):
     """Function to compare pattern descriptions and determine if they match."""
     if not api_key or not reference_pattern or not generated_pattern:
         return "No"
-    
+
     client = genai.Client(api_key=api_key)
-    
+
     for attempt in range(max_retries):
         try:
             prompt = f"""Compare these two pattern descriptions and determine if they represent the same or very similar patterns:
@@ -176,13 +200,12 @@ Analyze if they match based on:
 - Spacing (should be similar)
 
 Respond with ONLY "Yes" if the patterns match well, or "No" if they don't match. Be strict in your evaluation - only say "Yes" if the patterns are genuinely similar across all four attributes."""
-            
+
             response = await asyncio.get_event_loop().run_in_executor(
                 None,
                 lambda: client.models.generate_content(
-                    model=model_name,
-                    contents=[prompt]
-                )
+                    model=model_name, contents=[prompt]
+                ),
             )
             result = response.text.strip().lower()
             return "Yes" if "yes" in result else "No"
@@ -193,7 +216,15 @@ Respond with ONLY "Yes" if the patterns match well, or "No" if they don't match.
             await asyncio.sleep(2)
     return "No"
 
-async def segment_garment(pil_image, target_garment, api_key, model_name="gemini-2.5-pro-preview-06-05", max_retries=0, base_delay=2):
+
+async def segment_garment(
+    pil_image,
+    target_garment,
+    api_key,
+    model_name="gemini-2.5-flash-preview-05-20",
+    max_retries=0,
+    base_delay=2,
+):
     """Segments the primary garment from a PIL image using the GeminiSegmentationModel."""
     if not api_key:
         return pil_image, None, "API key not provided"
@@ -204,7 +235,7 @@ async def segment_garment(pil_image, target_garment, api_key, model_name="gemini
     # The model's segment_image method requires a file path.
     # We'll save the PIL image to a temporary file.
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp_f:
-        pil_image.convert("RGB").save(temp_f.name, format='PNG')
+        pil_image.convert("RGB").save(temp_f.name, format="PNG")
         temp_path = temp_f.name
 
     try:
@@ -225,41 +256,49 @@ async def segment_garment(pil_image, target_garment, api_key, model_name="gemini
                     combined_mask_np = np.zeros(img_size_hw, dtype=np.uint8)
                     labels = []
                     for mask_np, label in segmentation_data:
-                        if mask_np is not None and mask_np.shape == combined_mask_np.shape:
+                        if (
+                            mask_np is not None
+                            and mask_np.shape == combined_mask_np.shape
+                        ):
                             combined_mask_np = np.maximum(combined_mask_np, mask_np)
                         labels.append(label)
 
                     if np.any(combined_mask_np):
-                        mask_pil = Image.fromarray(combined_mask_np, 'L')
+                        mask_pil = Image.fromarray(combined_mask_np, "L")
                         # Use our existing apply_mask to get a transparent background
                         segmented_pil = apply_mask(pil_image, mask_pil)
                         description = ", ".join(labels) or target_garment
                         print("✅ Segmentation successful with module.")
                         return segmented_pil, mask_pil, description
 
-                print(f"Segmentation attempt {attempt + 1} with module failed: no objects found.")
+                print(
+                    f"Segmentation attempt {attempt + 1} with module failed: no objects found."
+                )
                 if attempt >= max_retries:
                     break
-                await asyncio.sleep(base_delay * (2 ** attempt))
+                await asyncio.sleep(base_delay * (2**attempt))
 
             except Exception as e:
                 print(f"Error during module segmentation (attempt {attempt + 1}): {e}")
                 if attempt >= max_retries:
                     break
-                await asyncio.sleep(base_delay * (2 ** attempt))
+                await asyncio.sleep(base_delay * (2**attempt))
     finally:
         os.remove(temp_path)
 
     # If all attempts fail, use a fallback generic mask.
-    print("All segmentation attempts failed. Using generic segmentation as final fallback.")
+    print(
+        "All segmentation attempts failed. Using generic segmentation as final fallback."
+    )
     generic_mask = create_generic_mask(pil_image)
     generic_segmented = apply_mask(pil_image, generic_mask)
     return generic_segmented, generic_mask, "Fallback Generic Mask"
 
+
 def create_generic_mask(pil_image):
     """Creates a generic, centered rectangular mask as a fallback."""
     width, height = pil_image.size
-    mask = Image.new('L', (width, height), 0)
+    mask = Image.new("L", (width, height), 0)
     draw = ImageDraw.Draw(mask)
     # Create a rectangle covering the central 80% of the image
     x0, y0 = int(width * 0.1), int(height * 0.1)
@@ -268,32 +307,41 @@ def create_generic_mask(pil_image):
     print("Created generic centered fallback mask.")
     return mask
 
+
 def apply_mask(image, mask):
     """Applies a mask to an image."""
-    if mask is None: return image
+    if mask is None:
+        return image
     if image.size != mask.size:
         mask = mask.resize(image.size, Image.Resampling.LANCZOS)
-    if mask.mode != 'L': mask = mask.convert('L')
-        
+    if mask.mode != "L":
+        mask = mask.convert("L")
+
     img_rgba = image.convert("RGBA")
     img_rgba.putalpha(mask)
     return img_rgba
 
+
 # --- Similarity Calculation ---
+
 
 def calculate_ciede1976_color_similarity(color1, color2):
     """Calculates color similarity based on CIEDE1976 delta E."""
-    if color1 is None or color2 is None: return 0.0
+    if color1 is None or color2 is None:
+        return 0.0
     lab1 = rgb2lab(np.uint8(np.asarray([[color1]])))
     lab2 = rgb2lab(np.uint8(np.asarray([[color2]])))
     delta_e = deltaE_cie76(lab1, lab2)[0][0]
     return max(0.0, 100.0 - delta_e)
 
+
 def calculate_apl_similarity_score(apl1, apl2, normalization_range=127.5):
     """Calculates similarity between two Average Pixel Luminance values."""
-    if apl1 is None or apl2 is None: return 0.0
+    if apl1 is None or apl2 is None:
+        return 0.0
     similarity = max(0.0, 1.0 - (abs(apl1 - apl2) / normalization_range))
     return max(0.0, min(100.0, similarity * 100.0))
+
 
 def calculate_ciede2000_color_similarity(color1_rgb, color2_rgb):
     """Calculates color similarity using the perceptually uniform CIEDE2000 metric."""
@@ -305,83 +353,91 @@ def calculate_ciede2000_color_similarity(color1_rgb, color2_rgb):
     # Convert delta E to similarity (0-100, higher is more similar). Scale factor 1.5 gives a useful range.
     return max(0.0, 100.0 - (delta_e * 1.5))
 
+
 def calculate_ssim_similarity(image1, image2, mask1=None, mask2=None):
     """
     Calculates Structural Similarity Index Measure (SSIM) between two images.
-    
+
     Args:
         image1: First PIL image
         image2: Second PIL image
         mask1: Optional mask for first image
         mask2: Optional mask for second image
-    
+
     Returns:
         Dictionary with SSIM similarity scores
     """
     if image1 is None or image2 is None:
         return {"ssim": 0.0}
-    
+
     # Convert images to grayscale numpy arrays
-    img1_gray = np.array(image1.convert('L'))
-    img2_gray = np.array(image2.convert('L'))
-    
+    img1_gray = np.array(image1.convert("L"))
+    img2_gray = np.array(image2.convert("L"))
+
     # Resize images to the same size if they differ
     if img1_gray.shape != img2_gray.shape:
         # Resize to the smaller dimensions to avoid upscaling artifacts
         target_height = min(img1_gray.shape[0], img2_gray.shape[0])
         target_width = min(img1_gray.shape[1], img2_gray.shape[1])
-        
-        img1_pil_resized = image1.resize((target_width, target_height), Image.Resampling.LANCZOS)
-        img2_pil_resized = image2.resize((target_width, target_height), Image.Resampling.LANCZOS)
-        
-        img1_gray = np.array(img1_pil_resized.convert('L'))
-        img2_gray = np.array(img2_pil_resized.convert('L'))
-    
+
+        img1_pil_resized = image1.resize(
+            (target_width, target_height), Image.Resampling.LANCZOS
+        )
+        img2_pil_resized = image2.resize(
+            (target_width, target_height), Image.Resampling.LANCZOS
+        )
+
+        img1_gray = np.array(img1_pil_resized.convert("L"))
+        img2_gray = np.array(img2_pil_resized.convert("L"))
+
     # Apply masks if provided
     if mask1 is not None or mask2 is not None:
         # Create combined mask
         combined_mask = np.ones_like(img1_gray, dtype=bool)
-        
+
         if mask1 is not None:
-            mask1_resized = mask1.resize((img1_gray.shape[1], img1_gray.shape[0]), Image.Resampling.LANCZOS)
-            mask1_np = np.array(mask1_resized.convert('L')) > 0
+            mask1_resized = mask1.resize(
+                (img1_gray.shape[1], img1_gray.shape[0]), Image.Resampling.LANCZOS
+            )
+            mask1_np = np.array(mask1_resized.convert("L")) > 0
             combined_mask = combined_mask & mask1_np
-        
+
         if mask2 is not None:
-            mask2_resized = mask2.resize((img2_gray.shape[1], img2_gray.shape[0]), Image.Resampling.LANCZOS)
-            mask2_np = np.array(mask2_resized.convert('L')) > 0
+            mask2_resized = mask2.resize(
+                (img2_gray.shape[1], img2_gray.shape[0]), Image.Resampling.LANCZOS
+            )
+            mask2_np = np.array(mask2_resized.convert("L")) > 0
             combined_mask = combined_mask & mask2_np
-        
+
         # Apply mask to both images
         img1_gray = np.where(combined_mask, img1_gray, 0)
         img2_gray = np.where(combined_mask, img2_gray, 0)
-    
+
     try:
         # Calculate SSIM with appropriate parameters
         # Use a smaller window size for better performance on smaller regions
         win_size = min(7, min(img1_gray.shape[0], img1_gray.shape[1]) // 2)
         if win_size < 3:
             win_size = 3
-        
-        ssim_index = ssim(
-            img1_gray, 
-            img2_gray, 
-            win_size=win_size,
-            data_range=255
-        )
-        
+
+        ssim_index = ssim(img1_gray, img2_gray, win_size=win_size, data_range=255)
+
         # Convert to percentage (0-100)
         ssim_percentage = max(0.0, ssim_index * 100.0)
-        
+
         return {"ssim": ssim_percentage}
-        
+
     except Exception as e:
         print(f"Error calculating SSIM: {e}")
         return {"ssim": 0.0}
 
+
 # --- Main Analysis Pipeline ---
 
-async def perform_deterministic_analysis(image1_pil_orig, image2_pil_orig, image3_pil_orig, api_key):
+
+async def perform_deterministic_analysis(
+    image1_pil_orig, image2_pil_orig, image3_pil_orig, api_key
+):
     """The main function to perform the full analysis pipeline."""
     st.write("### Gemini AI Segmentation Analysis")
     if not api_key:
@@ -398,7 +454,7 @@ async def perform_deterministic_analysis(image1_pil_orig, image2_pil_orig, image
         if "Failed" in ref_desc or "Unknown" in ref_desc:
             st.error(f"Could not identify reference garments: {ref_desc}")
             return None
-    
+
     with st.expander("**Reference Garments Identified**", expanded=True):
         st.write(ref_desc)
 
@@ -406,21 +462,21 @@ async def perform_deterministic_analysis(image1_pil_orig, image2_pil_orig, image
         pattern_tasks = [
             analyze_pattern_descriptions(image1_pil, "Reference Image", api_key),
             analyze_pattern_descriptions(image2_pil, "Generated Image 1", api_key),
-            analyze_pattern_descriptions(image3_pil, "Generated Image 2", api_key)
+            analyze_pattern_descriptions(image3_pil, "Generated Image 2", api_key),
         ]
         pattern_results = await asyncio.gather(*pattern_tasks)
-        
+
     with st.expander("**Pattern Analysis Results**", expanded=True):
         pattern_col1, pattern_col2, pattern_col3 = st.columns(3)
-        
+
         with pattern_col1:
             st.subheader("Reference Image Patterns")
             st.write(pattern_results[0])
-            
+
         with pattern_col2:
             st.subheader("Generated Image 1 Patterns")
             st.write(pattern_results[1])
-            
+
         with pattern_col3:
             st.subheader("Generated Image 2 Patterns")
             st.write(pattern_results[2])
@@ -428,22 +484,28 @@ async def perform_deterministic_analysis(image1_pil_orig, image2_pil_orig, image
     with st.spinner("Comparing pattern agreement..."):
         agreement_tasks = [
             compare_pattern_agreement(pattern_results[0], pattern_results[1], api_key),
-            compare_pattern_agreement(pattern_results[0], pattern_results[2], api_key)
+            compare_pattern_agreement(pattern_results[0], pattern_results[2], api_key),
         ]
         agreement_results = await asyncio.gather(*agreement_tasks)
 
     with st.expander("**Pattern Agreement Analysis**", expanded=True):
         agreement_col1, agreement_col2 = st.columns(2)
-        
+
         with agreement_col1:
             st.subheader("Reference vs Generated 1")
             agreement_color_1 = "green" if agreement_results[0] == "Yes" else "red"
-            st.markdown(f"**Pattern Agreement:** <span style='color:{agreement_color_1}'>{agreement_results[0]}</span>", unsafe_allow_html=True)
-            
+            st.markdown(
+                f"**Pattern Agreement:** <span style='color:{agreement_color_1}'>{agreement_results[0]}</span>",
+                unsafe_allow_html=True,
+            )
+
         with agreement_col2:
             st.subheader("Reference vs Generated 2")
             agreement_color_2 = "green" if agreement_results[1] == "Yes" else "red"
-            st.markdown(f"**Pattern Agreement:** <span style='color:{agreement_color_2}'>{agreement_results[1]}</span>", unsafe_allow_html=True)
+            st.markdown(
+                f"**Pattern Agreement:** <span style='color:{agreement_color_2}'>{agreement_results[1]}</span>",
+                unsafe_allow_html=True,
+            )
 
     with st.spinner(f"Step 3: Segmenting all images based on description..."):
         results = []
@@ -459,17 +521,21 @@ async def perform_deterministic_analysis(image1_pil_orig, image2_pil_orig, image
     for i, res in enumerate(results):
         img_pil = [image1_pil, image2_pil, image3_pil][i]
         if isinstance(res, Exception) or res[1] is None:
-            st.warning(f"Segmentation failed for image {i+1}. Reason: {res[2] if isinstance(res, tuple) else res}. Using original image for analysis.")
-            processed_results.append((img_pil, None, "Fallback")) # Use original image
+            st.warning(
+                f"Segmentation failed for image {i+1}. Reason: {res[2] if isinstance(res, tuple) else res}. Using original image for analysis."
+            )
+            processed_results.append((img_pil, None, "Fallback"))  # Use original image
         else:
             processed_results.append(res)
-    
+
     segmented_img1, mask1, _ = processed_results[0]
     segmented_img2, mask2, _ = processed_results[1]
     segmented_img3, mask3, _ = processed_results[2]
 
     if mask1 is None:
-        st.warning("Could not segment reference image. Analysis will be based on the full image.")
+        st.warning(
+            "Could not segment reference image. Analysis will be based on the full image."
+        )
         # We can still proceed using the unsegmented image.
         # The feature extraction will run on the full image.
 
@@ -486,46 +552,71 @@ async def perform_deterministic_analysis(image1_pil_orig, image2_pil_orig, image
         def compare_features(f1, f2, img1, img2, mask1, mask2):
             if not f2:
                 return {"ciede2000": 0.0}
-            c2000 = calculate_ciede2000_color_similarity(f1['dominant_color'], f2['dominant_color'])
-            return {
-                "ciede2000": c2000
-            }
+            c2000 = calculate_ciede2000_color_similarity(
+                f1["dominant_color"], f2["dominant_color"]
+            )
+            return {"ciede2000": c2000}
 
-        comp_1_2 = compare_features(features1, features2, image1_pil, image2_pil, mask1, mask2)
-        comp_1_3 = compare_features(features1, features3, image1_pil, image3_pil, mask1, mask3)
+        comp_1_2 = compare_features(
+            features1, features2, image1_pil, image2_pil, mask1, mask2
+        )
+        comp_1_3 = compare_features(
+            features1, features3, image1_pil, image3_pil, mask1, mask3
+        )
 
     # --- Display Results ---
     st.write("---")
     st.write("### 📊 Comparison Results")
-    
+
     final_images_col, scores_col = st.columns([2, 1])
 
     with final_images_col:
-        st.image([segmented_img1 or image1_pil, segmented_img2 or image2_pil, segmented_img3 or image3_pil], 
-                 caption=["Reference (Segmented)", "Generated 1 (Segmented)", "Generated 2 (Segmented)"], use_column_width=True)
+        st.image(
+            [
+                segmented_img1 or image1_pil,
+                segmented_img2 or image2_pil,
+                segmented_img3 or image3_pil,
+            ],
+            caption=[
+                "Reference (Segmented)",
+                "Generated 1 (Segmented)",
+                "Generated 2 (Segmented)",
+            ],
+            use_column_width=True,
+        )
 
     with scores_col:
         with st.expander("**Reference vs. Generated 1**", expanded=True):
             st.metric("CIEDE2000 Color Similarity", f"{comp_1_2['ciede2000']:.1f}%")
             agreement_color_1 = "green" if agreement_results[0] == "Yes" else "red"
-            st.markdown(f"**Pattern Agreement:** <span style='color:{agreement_color_1}'>{agreement_results[0]}</span>", unsafe_allow_html=True)
-        
+            st.markdown(
+                f"**Pattern Agreement:** <span style='color:{agreement_color_1}'>{agreement_results[0]}</span>",
+                unsafe_allow_html=True,
+            )
+
         st.write("---")
 
         with st.expander("**Reference vs. Generated 2**", expanded=True):
             st.metric("CIEDE2000 Color Similarity", f"{comp_1_3['ciede2000']:.1f}%")
             agreement_color_2 = "green" if agreement_results[1] == "Yes" else "red"
-            st.markdown(f"**Pattern Agreement:** <span style='color:{agreement_color_2}'>{agreement_results[1]}</span>", unsafe_allow_html=True)
+            st.markdown(
+                f"**Pattern Agreement:** <span style='color:{agreement_color_2}'>{agreement_results[1]}</span>",
+                unsafe_allow_html=True,
+            )
 
-    return { "comp_1_2": comp_1_2, "comp_1_3": comp_1_3 }
+    return {"comp_1_2": comp_1_2, "comp_1_3": comp_1_3}
+
 
 # --- Streamlit UI ---
 
+
 def main():
     st.set_page_config(layout="wide", page_title="Garment Comparison Tool")
-    
+
     st.title("👕 Garment Visual Comparison Tool")
-    st.write("Upload a reference garment image and two generated variants to compare them using Gemini-powered segmentation and analysis.")
+    st.write(
+        "Upload a reference garment image and two generated variants to compare them using Gemini-powered segmentation and analysis."
+    )
 
     with st.expander("About The Analysis Methods"):
         st.subheader("Dominant Color Extraction")
@@ -544,12 +635,20 @@ def main():
 
     with st.sidebar:
         st.header("Controls")
-        google_api_key = st.text_input("Google AI API Key", type="password", help="Required for Gemini analysis.")
-        
+        google_api_key = st.text_input(
+            "Google AI API Key", type="password", help="Required for Gemini analysis."
+        )
+
         st.header("Upload Images")
-        image_file_1 = st.file_uploader("Reference Garment", type=['png', 'jpg', 'jpeg'])
-        image_file_2 = st.file_uploader("Generated Garment 1", type=['png', 'jpg', 'jpeg'])
-        image_file_3 = st.file_uploader("Generated Garment 2", type=['png', 'jpg', 'jpeg'])
+        image_file_1 = st.file_uploader(
+            "Reference Garment", type=["png", "jpg", "jpeg"]
+        )
+        image_file_2 = st.file_uploader(
+            "Generated Garment 1", type=["png", "jpg", "jpeg"]
+        )
+        image_file_3 = st.file_uploader(
+            "Generated Garment 2", type=["png", "jpg", "jpeg"]
+        )
 
     col1, col2, col3 = st.columns(3)
     if image_file_1:
@@ -565,13 +664,18 @@ def main():
                 image1 = Image.open(image_file_1)
                 image2 = Image.open(image_file_2)
                 image3 = Image.open(image_file_3)
-                
+
                 with st.spinner("Performing full analysis... This may take a minute."):
-                    asyncio.run(perform_deterministic_analysis(image1, image2, image3, google_api_key))
+                    asyncio.run(
+                        perform_deterministic_analysis(
+                            image1, image2, image3, google_api_key
+                        )
+                    )
             else:
                 st.error("Please provide a Google AI API Key in the sidebar.")
         else:
             st.warning("Please upload all three images.")
+
 
 if __name__ == "__main__":
     main()
