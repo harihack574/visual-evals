@@ -9,7 +9,7 @@ import json
 import io
 from typing import List, Tuple, Optional, Union
 import os
-
+from tools.cache_helper import save_cache_content, get_cache_content
 
 class GeminiSegmentationModel:
     """
@@ -191,7 +191,9 @@ class GeminiSegmentationModel:
         return result
 
     def segment_image(self, image_path: str, object_description: str, 
-                     temperature: float = 0.5) -> Tuple[List[Tuple[np.ndarray, str]], np.ndarray]:
+                     temperature: float = 0.5,
+                     experiment_name: str = "test",
+                     img_name: str = "") -> Tuple[List[Tuple[np.ndarray, str]], np.ndarray]:
         """
         Perform segmentation on an image based on text description.
         
@@ -210,20 +212,31 @@ class GeminiSegmentationModel:
         img_height, img_width = img.size[1], img.size[0]
         
         # Create prompt
-        prompt = f"Give the segmentation masks for {object_description}. Output a JSON list of segmentation masks where each entry contains the 2D bounding box in the key 'box_2d', the segmentation mask in key 'mask', and the text label in the key 'label'."
+        prompt = f"""Give the segmentation masks for {object_description}.
+        Output a JSON list of segmentation masks where each entry contains the 2D bounding box in the key 'box_2d',
+        the segmentation mask in key 'mask', and the text label in the key 'label'.
+        """
         
         # Generate content
-        response = self.client.models.generate_content(
-            model=self.model_id,
-            contents=[prompt, img],
-            config=types.GenerateContentConfig(
-                temperature=temperature,
-                safety_settings=self.safety_settings,
+        cache_parent_folder = f"{experiment_name}/segmentation"
+        cache_name = f"{img_name}_segmentation_output.txt"
+        cached_response = get_cache_content(cache_parent_folder, cache_name, type="text")
+        if cached_response is None:
+            response = self.client.models.generate_content(
+                model=self.model_id,
+                contents=[prompt, img],
+                config=types.GenerateContentConfig(
+                    temperature=temperature,
+                    safety_settings=self.safety_settings,
+                )
             )
-        )
-        
-        # Process response
-        result = response.text
+            
+            # Process response
+            result = response.text
+            save_cache_content(cache_parent_folder, cache_name, result, type="text")
+        else:
+            result = cached_response
+
         segmentation_data = self._generate_mask(result, img_height=img_height, img_width=img_width)
         
         # Create segmented image

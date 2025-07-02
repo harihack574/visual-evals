@@ -1,0 +1,2 @@
+CACHE_DIR = "cache"
+BASE_EXPERIMENT_NAME = "test"
