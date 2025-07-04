@@ -191,7 +191,7 @@ class GeminiSegmentationModel:
         return result
 
     def segment_image(self, image_path: str, object_description: str, 
-                     temperature: float = 0.5,
+                     temperature: float = 0.1,
                      experiment_name: str = "test",
                      img_name: str = "") -> Tuple[List[Tuple[np.ndarray, str]], np.ndarray]:
         """

@@ -30,19 +30,42 @@ def get_pattern_agreement_score(agreement_results):
     return average_score
 
 
+def get_reason_gist(reason, api_key, model_name="gemini-2.5-flash-lite-preview-06-17"):
+    client = genai.Client(api_key=api_key)
+
+    prompt = """
+    Given the following reason, extract maximum 2 bullet points giving "differences" reasons.
+    - Each bullet point should be a not more than 4 words.
+    - ignore length related differences.
+
+    Return the output in JSON format in the form of: ```json
+    {
+        "bullet_points": ["bullet_point1", "bullet_point2"]
+    }```""" + f"""Reason: {reason}"""
+
+    response = client.models.generate_content(
+        model=model_name, contents=[prompt]
+    )
+    return parse_json_from_text(response.text.strip())["bullet_points"]
+
+
 def pattern_agreement_display_format(agreement_results):
-    output_text = ("\n" + "-" * 100 + "\n").join(
-        [
+    def get_gist(garment):
+        if garment["reason_gist"]:
+            gist_text = "\n" + "\n".join([f"- {point}" for point in garment["reason_gist"]])
+            return f"Reason: {gist_text}<br/>"
+        else:
+            return ""
+
+    output_text = [
             f"""
 Garment: {garment["garment"]}<br/>
 Agreement: {garment["agreement"]}<br/>
-Reason: {garment["reason"]}<br/>
-Details: {garment["details"]}
+{get_gist(garment)}
 """
             for garment in agreement_results
         ]
-    )
-    return output_text
+    return "\n------------".join(output_text)
 
 
 # --- Image Processing and Feature Extraction ---
@@ -392,8 +415,7 @@ Focus on following garment:
 Consider the image (Reference Image the ground truth) to analyze if they match based on the following attributes:
 - Pattern type aspects, e.g. spacing, orientation
 - Pattern colors / shininess / texture / neighbouring contrasts / etc.
-- 1:1 item to color matching
-- Spacing
+- 1:1 item to color matching b/w ref and generated image
 
 Agreement values
 - No : visually very different on all above attributes
@@ -561,7 +583,7 @@ async def perform_deterministic_analysis(
         },
     }
 
-    st.write("### Gemini AI Segmentation Analysis")
+    st.write("### AI Segmentation Analysis")
     if not api_key:
         st.error("❌ Google AI API Key is required. Cannot proceed.")
         return None
@@ -586,53 +608,53 @@ async def perform_deterministic_analysis(
         display_text = f"""Found {len(garments_list)} garments:\n\n{"\n".join([f"- {g}" for g in garments_list])}"""
         st.write(display_text)
 
-    with st.spinner("Step 2: Analyzing patterns on all images..."):
-        pattern_tasks = [
-            analyze_pattern_descriptions_v2(
-                images_obj["reference"]["image"],
-                images_obj["reference"]["name"],
-                api_key,
-                model_name=gemini_model,
-                garments_list=garments_list,
-            ),
-            analyze_pattern_descriptions_v2(
-                images_obj["generated1"]["image"],
-                images_obj["generated1"]["name"],
-                api_key,
-                model_name=gemini_model,
-                garments_list=garments_list,
-            ),
-            analyze_pattern_descriptions_v2(
-                images_obj["generated2"]["image"],
-                images_obj["generated2"]["name"],
-                api_key,
-                model_name=gemini_model,
-                garments_list=garments_list,
-            ),
-        ]
-        pattern_results = await asyncio.gather(*pattern_tasks)
+    # with st.spinner("Step 2: Analyzing patterns on all images..."):
+    #     pattern_tasks = [
+    #         analyze_pattern_descriptions_v2(
+    #             images_obj["reference"]["image"],
+    #             images_obj["reference"]["name"],
+    #             api_key,
+    #             model_name=gemini_model,
+    #             garments_list=garments_list,
+    #         ),
+    #         analyze_pattern_descriptions_v2(
+    #             images_obj["generated1"]["image"],
+    #             images_obj["generated1"]["name"],
+    #             api_key,
+    #             model_name=gemini_model,
+    #             garments_list=garments_list,
+    #         ),
+    #         analyze_pattern_descriptions_v2(
+    #             images_obj["generated2"]["image"],
+    #             images_obj["generated2"]["name"],
+    #             api_key,
+    #             model_name=gemini_model,
+    #             garments_list=garments_list,
+    #         ),
+    #     ]
+    #     pattern_results = await asyncio.gather(*pattern_tasks)
 
-    with st.expander("**Pattern Analysis Results**", expanded=True):
-        pattern_col1, pattern_col2, pattern_col3 = st.columns(3)
+    # with st.expander("**Pattern Analysis Results**", expanded=True):
+    #     pattern_col1, pattern_col2, pattern_col3 = st.columns(3)
 
-        with pattern_col1:
-            st.subheader("Reference Image Patterns")
-            st.write(display_pattern_results(pattern_results[0]))
+    #     with pattern_col1:
+    #         st.subheader("Reference Image Patterns")
+    #         st.write(display_pattern_results(pattern_results[0]))
 
-        with pattern_col2:
-            st.subheader("Generated Image 1 Patterns")
-            st.write(display_pattern_results(pattern_results[1]))
+    #     with pattern_col2:
+    #         st.subheader("Generated Image 1 Patterns")
+    #         st.write(display_pattern_results(pattern_results[1]))
 
-        with pattern_col3:
-            st.subheader("Generated Image 2 Patterns")
-            st.write(display_pattern_results(pattern_results[2]))
+    #     with pattern_col3:
+    #         st.subheader("Generated Image 2 Patterns")
+    #         st.write(display_pattern_results(pattern_results[2]))
 
     cache_parent_folder = f"{BASE_EXPERIMENT_NAME}/images_dump"
     processed_results_cache = get_cache_content(
         cache_parent_folder, "processed_results", type="pkl"
     )
     if processed_results_cache is None:
-        with st.spinner("Step 3: Segmenting all images based on description..."):
+        with st.spinner("Step 2: Segmenting all images based on description..."):
             results = {}
             for idx, (img_obj_name, img_obj) in enumerate(images_obj.items(), start=1):
                 st.write(f"Segmenting image {idx} / 3 ...")
@@ -699,27 +721,46 @@ async def perform_deterministic_analysis(
         agreement_results_generated1 = await asyncio.gather(*agreement_tasks_generated1)
         agreement_results_generated2 = await asyncio.gather(*agreement_tasks_generated2)
 
-    with st.expander("**Pattern Agreement Analysis**", expanded=True):
-        agreement_col1, agreement_col2 = st.columns(2)
+    
+        cache_parent_folder = f"{BASE_EXPERIMENT_NAME}/images_dump"
+        cache_filename1 = "agreement_results_generated1"
+        cache_content = get_cache_content(cache_parent_folder, cache_filename1, type="json")
+        cache_filename2 = "agreement_results_generated2"
+        if cache_content is None:
+            for agreement_results in [agreement_results_generated1, agreement_results_generated2]:
+                for result in agreement_results:
+                    if result["agreement"] != "High":
+                        result["reason_gist"] = get_reason_gist(result["reason"], api_key)
+                    else:
+                        result["reason_gist"] = ""
+            save_cache_content(cache_parent_folder, cache_filename1, agreement_results_generated1, type="json")
+            save_cache_content(cache_parent_folder, cache_filename2, agreement_results_generated2, type="json")
+        else:
+            agreement_results_generated1 = cache_content
+            agreement_results_generated2 = get_cache_content(cache_parent_folder, cache_filename2, type="json")
 
-        with agreement_col1:
-            st.subheader("Reference vs Generated 1")
-            st.markdown(
-                pattern_agreement_display_format(agreement_results_generated1),
-                unsafe_allow_html=True,
-            )
 
-        with agreement_col2:
-            st.subheader("Reference vs Generated 2")
-            st.markdown(
-                pattern_agreement_display_format(agreement_results_generated2),
-                unsafe_allow_html=True,
-            )
+    # with st.expander("**Pattern Agreement Analysis**", expanded=True):
+    #     agreement_col1, agreement_col2 = st.columns(2)
+
+    #     with agreement_col1:
+    #         st.subheader("Reference vs Generated 1")
+    #         st.markdown(
+    #             pattern_agreement_display_format(agreement_results_generated1),
+    #             unsafe_allow_html=True,
+    #         )
+
+    #     with agreement_col2:
+    #         st.subheader("Reference vs Generated 2")
+    #         st.markdown(
+    #             pattern_agreement_display_format(agreement_results_generated2),
+    #             unsafe_allow_html=True,
+    #         )
 
     merged_mask_reference = get_merged_mask(processed_results['reference'])
     merged_mask_generated1 = get_merged_mask(processed_results['generated1'])
     merged_mask_generated2 = get_merged_mask(processed_results['generated2'])
-    with st.spinner("Step 4: Extracting features and comparing..."):
+    with st.spinner("Step 3: Extracting features and comparing..."):
         features1 = extract_features(
             images_obj["reference"]["image"],
             merged_mask_reference,
@@ -797,8 +838,6 @@ async def perform_deterministic_analysis(
                 f"**Pattern Agreement Details:** \n{pattern_agreement_display_format(agreement_results_generated1)}",
                 unsafe_allow_html=True,
             )
-
-        st.write("---")
 
         with st.expander("**Reference vs. Generated 2**", expanded=True):
             st.metric("CIEDE2000 Color Similarity", f"{comp_1_3['ciede2000']:.1f}%")
