@@ -14,3 +14,8 @@ Run app:
 ```bash
 uv run streamlit run demo.py
 ```
+
+
+```bash
+uv pip freeze > requirements.txt
+```
