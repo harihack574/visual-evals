@@ -10,6 +10,7 @@ import io
 from typing import List, Tuple, Optional, Union
 import os
 from tools.cache_helper import save_cache_content, get_cache_content
+from tools.prompt_templates import PromptTemplates
 
 class GeminiSegmentationModel:
     """
@@ -45,10 +46,7 @@ class GeminiSegmentationModel:
         ]
         
         # System instructions for bounding box generation
-        self.bounding_box_system_instructions = """
-        Return bounding boxes as a JSON array with labels. Never return masks or code fencing. Limit to 25 objects.
-        If an object is present multiple times, name them according to their unique characteristic (colors, size, position, unique characteristics, etc..).
-        """
+        self.bounding_box_system_instructions = PromptTemplates.get_bounding_box_system_instructions()
 
     def _parse_json(self, text: str) -> str:
         """Remove markdown formatting from JSON response."""
@@ -211,11 +209,8 @@ class GeminiSegmentationModel:
         img = PILImage.open(image_path)
         img_height, img_width = img.size[1], img.size[0]
         
-        # Create prompt
-        prompt = f"""Give the segmentation masks for {object_description}.
-        Output a JSON list of segmentation masks where each entry contains the 2D bounding box in the key 'box_2d',
-        the segmentation mask in key 'mask', and the text label in the key 'label'.
-        """
+        # Create prompt using centralized templates
+        prompt = PromptTemplates.get_segmentation_prompt(object_description)
         
         # Generate content
         cache_parent_folder = f"{experiment_name}/segmentation"
