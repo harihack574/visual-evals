@@ -582,22 +582,22 @@ async def perform_analysis(
             agreement_results_generated2 = cache_content.get("generated2", [])
 
 
-    with st.expander("**Pattern Agreement Analysis**", expanded=True):
-        agreement_col1, agreement_col2 = st.columns(2)
+    # with st.expander("**Pattern Agreement Analysis**", expanded=True):
+    #     agreement_col1, agreement_col2 = st.columns(2)
 
-        with agreement_col1:
-            st.subheader("Reference vs Generated 1")
-            st.markdown(
-                pattern_agreement_display_format(agreement_results_generated1, details=True),
-                unsafe_allow_html=True,
-            )
+    #     with agreement_col1:
+    #         st.subheader("Reference vs Generated 1")
+    #         st.markdown(
+    #             pattern_agreement_display_format(agreement_results_generated1, details=True),
+    #             unsafe_allow_html=True,
+    #         )
 
-        with agreement_col2:
-            st.subheader("Reference vs Generated 2")
-            st.markdown(
-                pattern_agreement_display_format(agreement_results_generated2, details=True),
-                unsafe_allow_html=True,
-            )
+    #     with agreement_col2:
+    #         st.subheader("Reference vs Generated 2")
+    #         st.markdown(
+    #             pattern_agreement_display_format(agreement_results_generated2, details=True),
+    #             unsafe_allow_html=True,
+    #         )
 
     merged_mask_reference = get_merged_mask(processed_results['reference_image'])
     merged_mask_generated1 = get_merged_mask(processed_results['generated_image_1'])
