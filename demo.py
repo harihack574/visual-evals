@@ -721,10 +721,11 @@ def main() -> None:
         google_api_key = st.text_input(
             "Google AI API Key", type="password", help="Required for Gemini analysis."
         )
-        gemini_model = st.selectbox(
-            "Gemini Model",
-            ["gemini-2.5-flash", "gemini-2.5-pro"],
-        )
+        # gemini_model = st.selectbox(
+        #     "Gemini Model",
+        #     ["gemini-2.5-flash", "gemini-2.5-pro"],
+        # )
+        gemini_model = "gemini-2.5-pro"
         experiment_name = st.text_input(
             "Experiment Name",
             value=BASE_EXPERIMENT_NAME,
