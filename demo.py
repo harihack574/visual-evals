@@ -698,23 +698,23 @@ def main() -> None:
 
     st.title("👕 Garment Visual Comparison Tool")
     st.write(
-        "Upload a reference garment image and two generated variants to compare them using Gemini-powered segmentation and analysis."
+        "Upload a reference garment image and two generated variants to compare them."
     )
 
-    with st.expander("About The Analysis Methods"):
-        st.subheader("Dominant Color Extraction")
-        st.markdown("""
-        Dominant color extraction provides a high-level summary of the garment's main colors.
-        - **Method**: Clustering algorithms, most commonly k-means, are applied to the pixel color values within the segmented garment region. The centroids of the resulting clusters represent the dominant colors.
-        - **Tools**: Python libraries OpenCV (`cv2.kmeans`) and scikit-learn (`sklearn.cluster.KMeans`) offer robust implementations of k-means.
-        - **Process**:
-            1. Read the input and output images.
-            2. Perform garment segmentation on both images.
-            3. For each segmented garment, convert the pixel data (typically RGB values) into a list suitable for clustering.
-            4. Apply k-means algorithm to find a predefined number of 'k' cluster centers (dominant colors). The choice of 'k' can be fixed or determined dynamically.
-            5. The resulting 'k' centroids (e.g., in RGB or CIELAB space) from the input garment are then compared against those from the output garment. This comparison can be done by calculating perceptual color difference metrics (discussed later) between corresponding dominant colors or by assessing the similarity of the sets of dominant colors.
-        - **Relevance**: This method is useful for a quick, overall assessment of color fidelity.
-        """)
+    # with st.expander("About The Analysis Methods"):
+    #     st.subheader("Dominant Color Extraction")
+    #     st.markdown("""
+    #     Dominant color extraction provides a high-level summary of the garment's main colors.
+    #     - **Method**: Clustering algorithms, most commonly k-means, are applied to the pixel color values within the segmented garment region. The centroids of the resulting clusters represent the dominant colors.
+    #     - **Tools**: Python libraries OpenCV (`cv2.kmeans`) and scikit-learn (`sklearn.cluster.KMeans`) offer robust implementations of k-means.
+    #     - **Process**:
+    #         1. Read the input and output images.
+    #         2. Perform garment segmentation on both images.
+    #         3. For each segmented garment, convert the pixel data (typically RGB values) into a list suitable for clustering.
+    #         4. Apply k-means algorithm to find a predefined number of 'k' cluster centers (dominant colors). The choice of 'k' can be fixed or determined dynamically.
+    #         5. The resulting 'k' centroids (e.g., in RGB or CIELAB space) from the input garment are then compared against those from the output garment. This comparison can be done by calculating perceptual color difference metrics (discussed later) between corresponding dominant colors or by assessing the similarity of the sets of dominant colors.
+    #     - **Relevance**: This method is useful for a quick, overall assessment of color fidelity.
+    #     """)
 
     with st.sidebar:
         st.header("Controls")
